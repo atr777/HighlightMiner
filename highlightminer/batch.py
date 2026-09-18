@@ -102,6 +102,7 @@ def run_batch(
     content_label: str | None = None,
     allow_model_download: bool = True,
     cpu_threads: int | None = None,
+    max_height: int = 1080,
     progress: BatchProgress | None = None,
 ) -> BatchResult:
     """Ingest and analyze every source, continuing past individual failures."""
@@ -132,7 +133,7 @@ def run_batch(
         try:
             if job.is_url:
                 report(job, "downloading")
-                ingested = ingest(job.source, videos)
+                ingested = ingest(job.source, videos, max_height=max_height)
                 job.video_path = ingested.video_path
                 job.chat_path = ingested.chat_path
                 job.chat_note = ingested.chat_error

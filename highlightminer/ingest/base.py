@@ -7,6 +7,7 @@ with one code path; chat is where the per-platform work lives.
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -19,6 +20,16 @@ IngestProgress = Callable[[str, float, str], None]
 
 class IngestError(RuntimeError):
     """A VOD or its chat could not be retrieved."""
+
+
+class InsufficientDiskSpace(IngestError):
+    """The estimated download will not fit on the target drive.
+
+    Worth failing fast and loudly: a 13.5 hour source-quality Twitch VOD is
+    about 39 GB, and discovering that at 3am partway through an unattended
+    batch leaves a part-file occupying the disk and Windows near zero free
+    space, which is worse than not starting.
+    """
 
 
 class ChatUnavailable(IngestError):
@@ -71,6 +82,76 @@ def _ffmpeg_dir() -> str | None:
     return str(Path(ffmpeg).parent) if ffmpeg else None
 
 
+
+# Twitch source ("chunked") 1080p60 measures around 6.4 Mbps. Used only when the
+# metadata carries no bitrate at all, and deliberately not optimistic.
+_FALLBACK_BITRATE_KBPS = 8000.0
+
+# Keep this much free beyond the download itself, for the analysis WAV, previews
+# and the operating system.
+_DISK_HEADROOM_BYTES = 5 * 1024**3
+_SIZE_SAFETY_FACTOR = 1.15
+
+
+def _format_bytes(value: float) -> str:
+    gb = value / 1024**3
+    return f"{gb:.1f} GB" if gb >= 1 else f"{value / 1024**2:.0f} MB"
+
+
+def estimate_download_bytes(info: dict, duration: float | None = None) -> int | None:
+    """Best estimate of a download's size from yt-dlp metadata.
+
+    Prefers an explicit filesize, then bitrate times duration. Returns None when
+    there is nothing to go on, which callers treat as "cannot check" rather than
+    "fits".
+    """
+    for key in ("filesize", "filesize_approx"):
+        value = info.get(key)
+        if value:
+            return int(value)
+
+    seconds = float(duration or info.get("duration") or 0.0)
+    if seconds <= 0:
+        return None
+
+    bitrate = info.get("tbr") or info.get("vbr")
+    if not bitrate:
+        formats = info.get("requested_formats") or []
+        bitrate = sum(float(f.get("tbr") or 0.0) for f in formats) or None
+    if not bitrate:
+        bitrate = _FALLBACK_BITRATE_KBPS
+    return int(float(bitrate) * 1000.0 / 8.0 * seconds)
+
+
+def check_disk_space(
+    dest_dir: str | Path,
+    estimated_bytes: int | None,
+    *,
+    headroom_bytes: int = _DISK_HEADROOM_BYTES,
+) -> None:
+    """Raise if an estimated download plus headroom will not fit."""
+    if not estimated_bytes:
+        return
+    target = Path(dest_dir).expanduser().resolve()
+    probe = target
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        free = shutil.disk_usage(probe).free
+    except OSError:
+        return
+
+    needed = int(estimated_bytes * _SIZE_SAFETY_FACTOR) + headroom_bytes
+    if free < needed:
+        raise InsufficientDiskSpace(
+            f"Not enough space on {probe.drive or probe}: "
+            f"{_format_bytes(free)} free, need about {_format_bytes(needed)} "
+            f"(estimated download {_format_bytes(estimated_bytes)} plus "
+            f"{_format_bytes(headroom_bytes)} working headroom). "
+            "Choose another drive, or pass skip_space_check to override."
+        )
+
+
 def probe_url(url: str) -> VodInfo:
     """Read VOD metadata without downloading anything."""
     yt_dlp = _import_yt_dlp()
@@ -100,6 +181,7 @@ def download_video(
     *,
     max_height: int = 1080,
     progress: IngestProgress | None = None,
+    skip_space_check: bool = False,
 ) -> Path:
     """Download a VOD to ``dest_dir`` and return its path.
 
@@ -140,6 +222,23 @@ def download_video(
     ffmpeg_dir = _ffmpeg_dir()
     if ffmpeg_dir:
         options["ffmpeg_location"] = ffmpeg_dir
+
+    if not skip_space_check:
+        # Metadata-only pass first, so an impossible download fails before it
+        # has written 28 GB of part-file to a drive that cannot hold it.
+        try:
+            with yt_dlp.YoutubeDL({**options, "skip_download": True}) as ydl:
+                preflight = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            raise IngestError(f"Could not read VOD metadata: {exc}") from exc
+        if isinstance(preflight, dict):
+            estimated = estimate_download_bytes(preflight)
+            if progress and estimated:
+                progress(
+                    "preflight", 0.0,
+                    f"Estimated download {_format_bytes(estimated)}",
+                )
+            check_disk_space(out_dir, estimated)
 
     try:
         with yt_dlp.YoutubeDL(options) as ydl:

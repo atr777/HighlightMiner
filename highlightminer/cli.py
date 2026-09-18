@@ -368,7 +368,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         result = ingest(
             args.url,
             args.video_dir,
+            max_height=args.max_height,
             with_chat=not args.no_chat,
+            skip_space_check=args.skip_space_check,
             progress=lambda stage, frac, msg: print(f"[{stage}] {msg}"),
         )
     except IngestError as exc:
@@ -404,6 +406,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
         content_label=args.content,
         allow_model_download=not args.no_model_download,
         cpu_threads=args.cpu_threads,
+        max_height=args.max_height,
         progress=lambda label, message: print(f"  {label}: {message}"),
     )
 
@@ -457,6 +460,14 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_cmd.add_argument("url")
     ingest_cmd.add_argument("--video-dir", default=str(app_root() / "highlightminer_work" / "vods"))
     ingest_cmd.add_argument("--no-chat", action="store_true", help="Skip chat replay entirely")
+    ingest_cmd.add_argument(
+        "--max-height", type=int, default=1080,
+        help="Cap the video height. 720 roughly halves the download; fine for letterbox output, softer for crop.",
+    )
+    ingest_cmd.add_argument(
+        "--skip-space-check", action="store_true",
+        help="Download even when the estimated size will not fit on the target drive.",
+    )
     ingest_cmd.add_argument("--download-only", action="store_true", help="Fetch the files without analyzing")
     ingest_cmd.add_argument("--content", default=None, help="Content/game label")
     ingest_cmd.add_argument("--work-dir", default=str(app_root() / "highlightminer_work"))
@@ -496,6 +507,10 @@ def build_parser() -> argparse.ArgumentParser:
             "since an unattended batch has no desktop to keep responsive. "
             "Pass 0 to reserve a core as interactive runs do."
         ),
+    )
+    batch_cmd.add_argument(
+        "--max-height", type=int, default=1080,
+        help="Cap the video height for every source.",
     )
     batch_cmd.set_defaults(func=cmd_batch)
 

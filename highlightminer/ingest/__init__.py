@@ -10,6 +10,9 @@ from __future__ import annotations
 from .base import (
     ChatUnavailable,
     IngestError,
+    InsufficientDiskSpace,
+    check_disk_space,
+    estimate_download_bytes,
     IngestResult,
     VodInfo,
     download_video,
@@ -20,6 +23,9 @@ from .router import SUPPORTED_PLATFORMS, ingest, is_supported_url, resolve
 __all__ = [
     "ChatUnavailable",
     "IngestError",
+    "InsufficientDiskSpace",
+    "check_disk_space",
+    "estimate_download_bytes",
     "IngestResult",
     "SUPPORTED_PLATFORMS",
     "VodInfo",

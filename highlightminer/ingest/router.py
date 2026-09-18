@@ -53,6 +53,7 @@ def ingest(
     *,
     max_height: int = 1080,
     with_chat: bool = True,
+    skip_space_check: bool = False,
     progress: IngestProgress | None = None,
 ) -> IngestResult:
     """Fetch a VOD and, where the platform offers one, its chat replay.
@@ -70,7 +71,12 @@ def ingest(
 
     if progress:
         progress("download", 0.0, "Downloading VOD")
-    video_path = download_video(url, video_dir, max_height=max_height, progress=progress)
+    video_path = download_video(
+        url, video_dir,
+        max_height=max_height,
+        progress=progress,
+        skip_space_check=skip_space_check,
+    )
 
     chat_path: Path | None = None
     chat_error: str | None = None
