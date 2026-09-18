@@ -39,6 +39,10 @@ class Settings:
     max_candidate_sec: float = 75.0
     min_candidate_score: float = 0.38
     max_candidates: int = 40
+    short_form_mode: bool = False
+    hook_lead_sec: float = 3.0
+    min_candidate_sec: float = 8.0
+    speech_snap_sec: float = 1.5
     chat_min_burst_messages: float = 3.0
     chat_quiet_msgs_per_min: float = 15.0
     chat_active_msgs_per_min: float = 60.0
@@ -98,6 +102,9 @@ class Settings:
             "merge_gap_sec": (0.0, 600.0),
             "max_candidate_sec": (1.0, 1800.0),
             "min_candidate_score": (0.0, 1.0),
+            "hook_lead_sec": (0.0, 60.0),
+            "min_candidate_sec": (1.0, 600.0),
+            "speech_snap_sec": (0.0, 30.0),
             "chat_min_burst_messages": (0.5, 100.0),
             "chat_quiet_msgs_per_min": (0.0, 1000.0),
             "chat_active_msgs_per_min": (0.0, 5000.0),
@@ -107,6 +114,11 @@ class Settings:
             if not low <= value <= high:
                 raise ValueError(f"{name} must be between {low} and {high}.")
             setattr(self, name, value)
+
+        if self.min_candidate_sec > self.max_candidate_sec:
+            raise ValueError(
+                "min_candidate_sec must not be greater than max_candidate_sec."
+            )
 
         if self.chat_active_msgs_per_min < self.chat_quiet_msgs_per_min:
             raise ValueError(

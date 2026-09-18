@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .config import Settings
+from .shortform import self_containment, shape_candidate
 from .timestamps import normalize_clip_bounds
 from .util import clamp, format_time
 
@@ -225,6 +226,20 @@ def find_candidates(
         else:
             start, end = raw_start, raw_end
 
+        if settings.short_form_mode:
+            # Reshape a review window into something postable: payoff near the
+            # front, edges on speech boundaries. Done before the window stats
+            # below so scores describe the clip that actually ships.
+            shaped = shape_candidate(
+                start, end, peak.time, transcript,
+                lead_sec=settings.hook_lead_sec,
+                min_duration_sec=settings.min_candidate_sec,
+                max_duration_sec=settings.max_candidate_sec,
+                snap_tolerance_sec=settings.speech_snap_sec,
+                source_duration=duration,
+            )
+            start, end = shaped.start, shaped.end
+
         # Candidate times are displayed/stored at millisecond precision. Clamp
         # after that rounding so the rounded representation can never exceed
         # ffprobe's more precise source duration.
@@ -268,6 +283,11 @@ def find_candidates(
             "weight_transcript": round(float(weights.get("transcript", 0.0)), 6),
             "weight_chat": round(float(weights.get("chat", 0.0)), 6),
             "seed_points": len(group),
+            "self_containment": (
+                self_containment(transcript, start, end) if transcript_available else None
+            ),
+            "hook_offset": round(max(0.0, float(peak.time) - start), 3),
+            "short_form_mode": bool(settings.short_form_mode),
         }
 
         candidates.append({
