@@ -36,6 +36,7 @@ from .storage import (
     list_analyses,
     load_analysis,
     record_export,
+    transcript_window,
 )
 from .transcription_status import transcription_status
 
@@ -324,6 +325,17 @@ def cmd_export(args: argparse.Namespace) -> int:
         print("No clips selected. Mark clips Keep in the UI or pass --all.")
         return 2
 
+    layout = None
+    if getattr(args, "layout", "source") != "source":
+        from .render import Layout
+
+        layout = Layout(kind=args.layout)
+
+    captions = bool(getattr(args, "captions", False))
+    if captions and layout is None:
+        print("--captions needs a vertical --layout; captions are burned during reframing.")
+        return 2
+
     for c, r in chosen:
         category = c.get("content_label") or analysis.get("content_label")
         out = export_clip(
@@ -334,10 +346,75 @@ def cmd_export(args: argparse.Namespace) -> int:
             r["end"],
             r.get("title") or None,
             category=category,
+            layout=layout,
+            # Fetched per clip rather than all at once: captions only need the
+            # segments overlapping this window.
+            transcript=(
+                transcript_window(args.db, args.analysis_id, r["start"], r["end"])
+                if captions else None
+            ),
         )
         record_export(args.db, args.analysis_id, c["id"], out)
         print(out)
     return 0
+
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """Download a VOD (and chat) from a URL, then analyze it."""
+    from .ingest import IngestError, ingest
+
+    try:
+        result = ingest(
+            args.url,
+            args.video_dir,
+            with_chat=not args.no_chat,
+            progress=lambda stage, frac, msg: print(f"[{stage}] {msg}"),
+        )
+    except IngestError as exc:
+        print(f"Ingest failed: {exc}")
+        return 2
+
+    print(f"Video: {result.video_path}")
+    if result.chat_path:
+        print(f"Chat:  {result.chat_path}")
+    elif result.chat_error:
+        print(f"Chat:  unavailable ({result.chat_error})")
+
+    if args.download_only:
+        return 0
+
+    args.video = str(result.video_path)
+    args.chat = str(result.chat_path) if result.chat_path else None
+    args.content = args.content or result.info.uploader or None
+    return cmd_analyze(args)
+
+
+def cmd_batch(args: argparse.Namespace) -> int:
+    """Ingest and analyze several sources unattended."""
+    from .batch import run_batch
+
+    settings = Settings.from_file(args.settings) if args.settings else load_app_settings(args.db)
+    result = run_batch(
+        args.sources,
+        args.work_dir,
+        settings,
+        db_path=args.db,
+        video_dir=args.video_dir,
+        content_label=args.content,
+        allow_model_download=not args.no_model_download,
+        progress=lambda label, message: print(f"  {label}: {message}"),
+    )
+
+    print()
+    print(result.summary())
+    for job in result.jobs:
+        marker = "ok  " if job.status == "done" else "FAIL"
+        detail = job.analysis_id or job.error or ""
+        print(f"  {marker} {job.seconds:>7.1f}s  {job.label}  {detail}")
+        if job.chat_note:
+            print(f"         chat: {job.chat_note}")
+    return 0 if not result.failed else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -374,6 +451,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     analyze.set_defaults(func=cmd_analyze)
 
+
+    ingest_cmd = sub.add_parser("ingest", help="Download a VOD from a Twitch/Kick/YouTube URL and analyze it")
+    ingest_cmd.add_argument("url")
+    ingest_cmd.add_argument("--video-dir", default=str(app_root() / "highlightminer_work" / "vods"))
+    ingest_cmd.add_argument("--no-chat", action="store_true", help="Skip chat replay entirely")
+    ingest_cmd.add_argument("--download-only", action="store_true", help="Fetch the files without analyzing")
+    ingest_cmd.add_argument("--content", default=None, help="Content/game label")
+    ingest_cmd.add_argument("--work-dir", default=str(app_root() / "highlightminer_work"))
+    ingest_cmd.add_argument("--settings", default=None)
+    ingest_cmd.add_argument("--db", default=default_db, help="SQLite database path")
+    ingest_cmd.add_argument("--no-reuse", action="store_true")
+    ingest_model = ingest_cmd.add_mutually_exclusive_group()
+    ingest_model.add_argument("--allow-model-download", action="store_true")
+    ingest_model.add_argument("--no-transcription", action="store_true")
+    ingest_cmd.set_defaults(func=cmd_ingest)
+
+    batch_cmd = sub.add_parser(
+        "batch",
+        help="Ingest and analyze several URLs or files unattended, continuing past failures",
+    )
+    batch_cmd.add_argument(
+        "sources",
+        nargs="+",
+        help="URLs, local video paths, or a .txt file listing one source per line",
+    )
+    batch_cmd.add_argument("--work-dir", default=str(app_root() / "highlightminer_work"))
+    batch_cmd.add_argument("--video-dir", default=None)
+    batch_cmd.add_argument("--content", default=None, help="Content/game label for every source")
+    batch_cmd.add_argument("--settings", default=None)
+    batch_cmd.add_argument("--db", default=default_db, help="SQLite database path")
+    batch_cmd.add_argument(
+        "--no-model-download",
+        action="store_true",
+        help="Fail rather than download a missing recognition model",
+    )
+    batch_cmd.set_defaults(func=cmd_batch)
+
     ui = sub.add_parser("ui", help="Launch the local review UI")
     ui.add_argument("--browser", action="store_true", help="Use system browser instead of Windows desktop shell")
     ui.set_defaults(func=cmd_ui)
@@ -397,6 +511,17 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--db", default=default_db)
     export.add_argument("--output", default=None)
     export.add_argument("--all", action="store_true", help="Export every ranked candidate")
+    export.add_argument(
+        "--layout",
+        choices=("source", "letterbox", "crop", "webcam"),
+        default="source",
+        help="Vertical 9:16 layout for short-form output; source keeps the original aspect",
+    )
+    export.add_argument(
+        "--captions",
+        action="store_true",
+        help="Burn word-timed captions into the exported clips",
+    )
     export.set_defaults(func=cmd_export)
     return p
 
