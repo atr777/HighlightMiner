@@ -25,6 +25,7 @@ dependencies = [
   "psutil>=6,<8",
   "faster-whisper>=1.2.1,<2",
   "streamlit>=1.36,<2",
+  "yt-dlp>=2025.1",
   "pywebview>=6.2.1,<7; platform_system == 'Windows'",
 ]
 

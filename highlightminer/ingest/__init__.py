@@ -7,4 +7,25 @@ offers one, a chat export in the shape ``chat.load_chat`` already parses.
 
 from __future__ import annotations
 
-__all__ = ["twitch"]
+from .base import (
+    ChatUnavailable,
+    IngestError,
+    IngestResult,
+    VodInfo,
+    download_video,
+    probe_url,
+)
+from .router import SUPPORTED_PLATFORMS, ingest, is_supported_url, resolve
+
+__all__ = [
+    "ChatUnavailable",
+    "IngestError",
+    "IngestResult",
+    "SUPPORTED_PLATFORMS",
+    "VodInfo",
+    "download_video",
+    "ingest",
+    "is_supported_url",
+    "probe_url",
+    "resolve",
+]

@@ -21,6 +21,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from .base import IngestError
+
 # The public web-client ID the Twitch player sends. This is not a secret and not
 # a credential; it identifies the client application, not a user.
 _CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
@@ -39,8 +41,20 @@ _BACKOFF_SEC = 1.5
 Progress = Callable[[int, float], None]
 
 
-class TwitchIngestError(RuntimeError):
+platform = "twitch"
+
+
+class TwitchIngestError(IngestError):
     """Raised when Twitch chat replay cannot be retrieved."""
+
+
+def matches(url: str) -> bool:
+    return "twitch.tv" in url
+
+
+def video_id(url: str) -> str:
+    """Adapter-interface alias for :func:`parse_video_id`."""
+    return parse_video_id(url)
 
 
 def parse_video_id(url_or_id: str) -> str:
@@ -159,8 +173,9 @@ def fetch_chat(url_or_id: str, out_path: str | Path, progress: Progress | None =
     A VOD with chat replay disabled simply yields an empty list, which the
     pipeline treats as "no chat signal" and renormalizes the other weights.
     """
-    video_id = parse_video_id(url_or_id)
-    records = list(iter_comments(video_id, progress))
+    # Local name avoids shadowing the module-level video_id() adapter function.
+    vod_id = parse_video_id(url_or_id)
+    records = list(iter_comments(vod_id, progress))
     records.sort(key=lambda r: r["content_offset_seconds"])
 
     out = Path(out_path).expanduser().resolve()
