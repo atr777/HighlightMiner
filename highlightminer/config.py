@@ -47,6 +47,7 @@ class Settings:
     caption_uppercase: bool = False
     webcam_fraction: float = 0.3
     webcam_rect: dict[str, float] | None = None
+    gameplay_rect: dict[str, float] | None = None
     audio_only_penalty: float = 1.0
     duplicate_containment: float = 0.65
     cpu_threads: int = 0
@@ -106,13 +107,24 @@ class Settings:
         self.webcam_fraction = float(self.webcam_fraction)
         if not 0.05 <= self.webcam_fraction <= 0.95:
             raise ValueError("webcam_fraction must be between 0.05 and 0.95.")
-        if self.webcam_rect is not None:
-            if not isinstance(self.webcam_rect, dict):
-                raise ValueError("webcam_rect must be a JSON object or null.")
-            self.webcam_rect = {
-                key: float(self.webcam_rect.get(key, default))
+        for name in ("webcam_rect", "gameplay_rect"):
+            rect = getattr(self, name)
+            if rect is None:
+                continue
+            if not isinstance(rect, dict):
+                raise ValueError(f"{name} must be a JSON object or null.")
+            cleaned = {
+                key: float(rect.get(key, default))
                 for key, default in (("x", 0.0), ("y", 0.0), ("w", 1.0), ("h", 1.0))
             }
+            for key, value in cleaned.items():
+                if not 0.0 <= value <= 1.0:
+                    raise ValueError(f"{name}.{key} must be between 0.0 and 1.0.")
+            if cleaned["w"] <= 0.0 or cleaned["h"] <= 0.0:
+                raise ValueError(f"{name} width and height must be greater than zero.")
+            if cleaned["x"] + cleaned["w"] > 1.0 + 1e-9 or cleaned["y"] + cleaned["h"] > 1.0 + 1e-9:
+                raise ValueError(f"{name} extends past the edge of the frame.")
+            setattr(self, name, cleaned)
         if self.render_layout == "webcam" and not self.webcam_rect:
             raise ValueError("The webcam layout needs webcam_rect to be set.")
 

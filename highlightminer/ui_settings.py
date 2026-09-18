@@ -63,6 +63,11 @@ _EDITOR_KEYS = {
     "webcam_w": "cfg_webcam_w",
     "webcam_h": "cfg_webcam_h",
     "webcam_enabled": "cfg_webcam_enabled",
+    "crop_enabled": "cfg_crop_enabled",
+    "crop_x": "cfg_crop_x",
+    "crop_y": "cfg_crop_y",
+    "crop_w": "cfg_crop_w",
+    "crop_h": "cfg_crop_h",
 }
 
 _PRIMARY_WHISPER_MODELS = ("large-v3", "turbo", "medium", "small")
@@ -127,6 +132,11 @@ def _seed_editor(settings: Settings, *, force: bool = False) -> None:
         "webcam_y": float((settings.webcam_rect or {}).get("y", 0.0)),
         "webcam_w": float((settings.webcam_rect or {}).get("w", 0.30)),
         "webcam_h": float((settings.webcam_rect or {}).get("h", 0.30)),
+        "crop_enabled": settings.gameplay_rect is not None,
+        "crop_x": float((settings.gameplay_rect or {}).get("x", 0.341797)),
+        "crop_y": float((settings.gameplay_rect or {}).get("y", 0.0)),
+        "crop_w": float((settings.gameplay_rect or {}).get("w", 0.316406)),
+        "crop_h": float((settings.gameplay_rect or {}).get("h", 1.0)),
     }
     for name, value in values.items():
         st.session_state[_EDITOR_KEYS[name]] = value
@@ -142,6 +152,18 @@ def _editor_webcam_rect() -> dict[str, float] | None:
         "y": float(st.session_state[_EDITOR_KEYS["webcam_y"]]),
         "w": float(st.session_state[_EDITOR_KEYS["webcam_w"]]),
         "h": float(st.session_state[_EDITOR_KEYS["webcam_h"]]),
+    }
+
+
+def _editor_gameplay_rect() -> dict[str, float] | None:
+    """The crop region, or None to use the centred 9:16 slice."""
+    if not st.session_state.get(_EDITOR_KEYS["crop_enabled"]):
+        return None
+    return {
+        "x": float(st.session_state[_EDITOR_KEYS["crop_x"]]),
+        "y": float(st.session_state[_EDITOR_KEYS["crop_y"]]),
+        "w": float(st.session_state[_EDITOR_KEYS["crop_w"]]),
+        "h": float(st.session_state[_EDITOR_KEYS["crop_h"]]),
     }
 
 
@@ -240,6 +262,7 @@ def _build_settings() -> Settings:
         caption_uppercase=bool(st.session_state[_EDITOR_KEYS["caption_upper"]]),
         webcam_fraction=float(st.session_state[_EDITOR_KEYS["webcam_fraction"]]),
         webcam_rect=_editor_webcam_rect(),
+        gameplay_rect=_editor_gameplay_rect(),
         audio_only_penalty=float(st.session_state[_EDITOR_KEYS["audio_only_penalty"]]),
         duplicate_containment=float(st.session_state[_EDITOR_KEYS["duplicate_containment"]]),
         chat_quiet_msgs_per_min=float(st.session_state[_EDITOR_KEYS["chat_quiet"]]),
@@ -422,9 +445,22 @@ def render_settings_page(db_path: Path) -> None:
         )
         if st.session_state[_EDITOR_KEYS["render_layout"]] == "crop":
             st.caption(
-                "A centred 9:16 crop keeps about 28% of a 16:9 width, so minimaps and "
-                "kill feeds near the edges are lost. Check it against real footage."
+                "A centred 9:16 crop keeps about 32% of a 16:9 width, so minimaps and "
+                "kill feeds near the edges are lost. That is usually a feature for short "
+                "form, but a persistent overlay can end up sliced in half."
             )
+            st.toggle(
+                "Use a custom crop region",
+                key=_EDITOR_KEYS["crop_enabled"],
+                help="Off uses the centred slice. On lets you nudge the window off a stream overlay.",
+            )
+            if st.session_state[_EDITOR_KEYS["crop_enabled"]]:
+                g1, g2, g3, g4 = st.columns(4)
+                g1.number_input("x", min_value=0.0, max_value=1.0, step=0.01, key=_EDITOR_KEYS["crop_x"])
+                g2.number_input("y", min_value=0.0, max_value=1.0, step=0.01, key=_EDITOR_KEYS["crop_y"])
+                g3.number_input("width", min_value=0.01, max_value=1.0, step=0.01, key=_EDITOR_KEYS["crop_w"])
+                g4.number_input("height", min_value=0.01, max_value=1.0, step=0.01, key=_EDITOR_KEYS["crop_h"])
+                st.caption("Fractions of the source frame. Width 0.316 is exactly 9:16 from 16:9.")
 
         if st.session_state[_EDITOR_KEYS["render_layout"]] == "webcam":
             st.toggle("Webcam region set", key=_EDITOR_KEYS["webcam_enabled"])

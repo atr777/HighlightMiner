@@ -41,6 +41,7 @@ def product_default_settings() -> Settings:
         caption_uppercase=False,
         webcam_fraction=0.3,
         webcam_rect=None,
+        gameplay_rect=None,
         audio_only_penalty=1.0,
         duplicate_containment=0.65,
         cpu_threads=0,

@@ -251,9 +251,11 @@ def layout_from_settings(settings) -> Layout | None:
     kind = getattr(settings, "render_layout", "source")
     if kind == "source":
         return None
-    rect = getattr(settings, "webcam_rect", None)
+    webcam = getattr(settings, "webcam_rect", None)
+    gameplay = getattr(settings, "gameplay_rect", None)
     return Layout(
         kind=kind,
-        webcam=Rect.from_dict(rect) if rect else None,
+        gameplay=Rect.from_dict(gameplay) if gameplay else None,
+        webcam=Rect.from_dict(webcam) if webcam else None,
         webcam_fraction=float(getattr(settings, "webcam_fraction", 0.3)),
     )

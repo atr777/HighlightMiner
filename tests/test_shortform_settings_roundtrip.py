@@ -25,6 +25,7 @@ SHORT_FORM_FIELDS = (
     "caption_uppercase",
     "webcam_fraction",
     "webcam_rect",
+    "gameplay_rect",
     "audio_only_penalty",
     "duplicate_containment",
     "cpu_threads",
@@ -64,6 +65,7 @@ def test_editor_seeds_and_rebuilds_every_short_form_field(monkeypatch):
         caption_uppercase=True,
         webcam_fraction=0.42,
         webcam_rect={"x": 0.7, "y": 0.0, "w": 0.3, "h": 0.25},
+        gameplay_rect={"x": 0.27, "y": 0.0, "w": 0.316406, "h": 1.0},
         audio_only_penalty=0.6,
         duplicate_containment=0.55,
         cpu_threads=11,
@@ -77,6 +79,24 @@ def test_editor_seeds_and_rebuilds_every_short_form_field(monkeypatch):
 
     for name in SHORT_FORM_FIELDS:
         assert getattr(rebuilt, name) == getattr(original, name), f"{name} was not preserved"
+
+
+def test_gameplay_rect_is_dropped_when_disabled(monkeypatch):
+    ui_settings = _editor_module()
+    state: dict = {}
+    monkeypatch.setattr(ui_settings.st, "session_state", state)
+    ui_settings._seed_editor(Settings(render_layout="crop"), force=True)
+    assert ui_settings._editor_gameplay_rect() is None
+    assert ui_settings._build_settings().gameplay_rect is None
+
+
+def test_gameplay_rect_defaults_to_the_centred_slice(monkeypatch):
+    """With no custom region, the editor seeds the exact 9:16 centre."""
+    ui_settings = _editor_module()
+    state: dict = {}
+    monkeypatch.setattr(ui_settings.st, "session_state", state)
+    ui_settings._seed_editor(Settings(render_layout="crop"), force=True)
+    assert state[ui_settings._EDITOR_KEYS["crop_w"]] == pytest.approx(0.316406)
 
 
 def test_webcam_rect_is_dropped_when_disabled(monkeypatch):
@@ -138,6 +158,9 @@ def test_short_form_settings_survive_a_database_round_trip(tmp_path):
         ({"caption_font_size": 4}, "caption_font_size"),
         ({"webcam_fraction": 0.99}, "webcam_fraction"),
         ({"cpu_threads": -1}, "cpu_threads"),
+        ({"gameplay_rect": {"x": 0.9, "w": 0.5}}, "gameplay_rect"),
+        ({"gameplay_rect": {"w": 0.0}}, "gameplay_rect"),
+        ({"gameplay_rect": {"x": -0.1}}, "gameplay_rect"),
     ],
 )
 def test_invalid_render_settings_are_rejected(kwargs, message):
