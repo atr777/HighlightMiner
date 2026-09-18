@@ -403,6 +403,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
         video_dir=args.video_dir,
         content_label=args.content,
         allow_model_download=not args.no_model_download,
+        cpu_threads=args.cpu_threads,
         progress=lambda label, message: print(f"  {label}: {message}"),
     )
 
@@ -485,6 +486,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-model-download",
         action="store_true",
         help="Fail rather than download a missing recognition model",
+    )
+    batch_cmd.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=None,
+        help=(
+            "Transcription threads. Defaults to all logical cores minus one, "
+            "since an unattended batch has no desktop to keep responsive. "
+            "Pass 0 to reserve a core as interactive runs do."
+        ),
     )
     batch_cmd.set_defaults(func=cmd_batch)
 

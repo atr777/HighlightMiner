@@ -39,6 +39,7 @@ def _represents_same_event(
     right: dict,
     *,
     peak_tolerance_floor_sec: float = 0.0,
+    min_containment: float = _DUPLICATE_MIN_CONTAINMENT,
 ) -> bool:
     """Return whether two padded clip windows still describe one event.
 
@@ -54,7 +55,7 @@ def _represents_same_event(
         - max(float(left["start"]), float(right["start"])),
     )
     shorter = min(_candidate_duration(left), _candidate_duration(right))
-    if shorter <= 0.0 or intersection / shorter < _DUPLICATE_MIN_CONTAINMENT:
+    if shorter <= 0.0 or intersection / shorter < min_containment:
         return False
 
     peak_tolerance = max(
@@ -82,6 +83,7 @@ def deduplicate_candidates(
     *,
     max_candidates: int,
     peak_tolerance_floor_sec: float = 0.0,
+    min_containment: float = _DUPLICATE_MIN_CONTAINMENT,
 ) -> list[dict]:
     """Suppress weaker candidates for the same event without merging windows."""
     limit = max(0, int(max_candidates))
@@ -98,6 +100,7 @@ def deduplicate_candidates(
                     candidate,
                     winner,
                     peak_tolerance_floor_sec=peak_tolerance_floor_sec,
+                    min_containment=min_containment,
                 )
             ),
             None,
@@ -254,6 +257,19 @@ def find_candidates(
         top_mean = sum(avg_top) / max(1, len(avg_top))
         score = clamp(0.72 * peak.combined + 0.28 * top_mean)
 
+        # A loud moment nothing else corroborates is usually noise, not an
+        # event. Measured on the test VOD: a candidate scored audio 0.97 with
+        # a transcript score of exactly 0.00, and the VOD's own transcript
+        # explains it as the streamer's PC fans. Penalised rather than
+        # dropped, so it stays reviewable and still yields a learning label.
+        corroborated = (
+            (transcript_available and max_tx >= 0.55)
+            or (bool(chat_features) and max_chat >= 0.70)
+        )
+        audio_only = max_audio >= 0.72 and not corroborated
+        if audio_only:
+            score = clamp(score * float(settings.audio_only_penalty))
+
         reasons = []
         if transcript_available and max_tx >= 0.55:
             reasons.append("reaction-heavy speech")
@@ -283,6 +299,7 @@ def find_candidates(
             "weight_transcript": round(float(weights.get("transcript", 0.0)), 6),
             "weight_chat": round(float(weights.get("chat", 0.0)), 6),
             "seed_points": len(group),
+            "audio_only": bool(audio_only),
             "self_containment": (
                 self_containment(transcript, start, end) if transcript_available else None
             ),
@@ -312,6 +329,7 @@ def find_candidates(
         candidates,
         max_candidates=settings.max_candidates,
         peak_tolerance_floor_sec=settings.merge_gap_sec + timeline_step,
+        min_containment=settings.duplicate_containment,
     )
 
     for rank, cand in enumerate(kept, start=1):

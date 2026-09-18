@@ -227,7 +227,12 @@ def transcribe_audio(
     )
     device, compute_type = resolve_device(settings)
     fallback_reason = None
-    cpu_threads = _cpu_thread_count() if device == "cpu" else None
+    # 0 means auto, which reserves a core for the desktop. An unattended
+    # batch has no desktop to protect and can take the whole machine.
+    if device == "cpu":
+        cpu_threads = int(settings.cpu_threads) or _cpu_thread_count()
+    else:
+        cpu_threads = None
     model_kwargs: dict[str, Any] = {
         "local_files_only": prepared.local_files_only,
     }

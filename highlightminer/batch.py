@@ -12,9 +12,11 @@ overnight job.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
+
+import psutil
 
 from .config import Settings
 from .ingest import IngestError, ingest, is_supported_url
@@ -99,9 +101,19 @@ def run_batch(
     video_dir: str | Path | None = None,
     content_label: str | None = None,
     allow_model_download: bool = True,
+    cpu_threads: int | None = None,
     progress: BatchProgress | None = None,
 ) -> BatchResult:
     """Ingest and analyze every source, continuing past individual failures."""
+    # Interactive analysis reserves a core so the desktop stays usable. An
+    # unattended batch has no desktop to protect, and measured 24% faster
+    # transcription with all logical cores minus one (103.5s against 128.3s
+    # on a 4 minute sample).
+    if cpu_threads is None:
+        logical = psutil.cpu_count(logical=True) or 0
+        cpu_threads = max(1, logical - 1) if logical > 1 else 0
+    if cpu_threads:
+        settings = replace(settings, cpu_threads=int(cpu_threads))
     work_root = Path(work_root).expanduser().resolve()
     work_root.mkdir(parents=True, exist_ok=True)
     videos = Path(video_dir).expanduser().resolve() if video_dir else work_root / "vods"

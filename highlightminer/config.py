@@ -40,6 +40,9 @@ class Settings:
     min_candidate_score: float = 0.38
     max_candidates: int = 40
     short_form_mode: bool = False
+    audio_only_penalty: float = 1.0
+    duplicate_containment: float = 0.65
+    cpu_threads: int = 0
     hook_lead_sec: float = 3.0
     min_candidate_sec: float = 8.0
     speech_snap_sec: float = 1.5
@@ -88,6 +91,9 @@ class Settings:
                 raise ValueError("language is unexpectedly long.")
 
         self.beam_size = int(self.beam_size)
+        self.cpu_threads = int(self.cpu_threads)
+        if not 0 <= self.cpu_threads <= 256:
+            raise ValueError("cpu_threads must be between 0 (auto) and 256.")
         self.max_candidates = int(self.max_candidates)
         if not 1 <= self.beam_size <= 20:
             raise ValueError("beam_size must be between 1 and 20.")
@@ -102,6 +108,8 @@ class Settings:
             "merge_gap_sec": (0.0, 600.0),
             "max_candidate_sec": (1.0, 1800.0),
             "min_candidate_score": (0.0, 1.0),
+            "audio_only_penalty": (0.0, 1.0),
+            "duplicate_containment": (0.1, 1.0),
             "hook_lead_sec": (0.0, 60.0),
             "min_candidate_sec": (1.0, 600.0),
             "speech_snap_sec": (0.0, 30.0),

@@ -40,6 +40,8 @@ TIMING_PRESETS: dict[str, dict[str, float | bool]] = {
         "hook_lead_sec": 3.0,
         "min_candidate_score": 0.38,
         "max_candidates": 40,
+        "audio_only_penalty": 1.0,
+        "duplicate_containment": 0.65,
     },
     "Short-form": {
         # Measured against the review preset on a real VOD: median hook offset
@@ -52,6 +54,10 @@ TIMING_PRESETS: dict[str, dict[str, float | bool]] = {
         "hook_lead_sec": 3.0,
         "min_candidate_score": 0.42,
         "max_candidates": 20,
+        # A loud moment nothing corroborates is usually noise. Short form has
+        # no room to carry a false positive, so penalise harder here.
+        "audio_only_penalty": 0.6,
+        "duplicate_containment": 0.55,
     },
 }
 
