@@ -19,7 +19,10 @@ from .analysis_history import AnalysisDeletionBlocked, analysis_deletion_impact,
 from .analysis_identity import load_analysis_identities, load_analysis_identity, save_analysis_title
 from .categorization import normalize_content_label
 from .config import Settings
+from .captions import style_from_settings
 from .export import PreviewFileLockError, create_preview_clip, export_clip
+from .ingest import SUPPORTED_PLATFORMS, IngestError, ingest
+from .render import layout_from_settings
 from .export_queue import (
     ExportBatchAlreadyRunning,
     ExportBatchHeartbeat,
@@ -56,7 +59,14 @@ from .review import load_review, save_review
 from .security import validate_chat_file, validate_local_video
 from .settings_presets import detect_weight_preset, normalize_weights
 from .settings_store import load_app_settings
-from .storage import find_source_runs, import_legacy_analysis, learning_summary, list_analyses, load_analysis
+from .storage import (
+    find_source_runs,
+    import_legacy_analysis,
+    learning_summary,
+    list_analyses,
+    load_analysis,
+    transcript_window,
+)
 from .shutdown import active_work_shutdown_block_reason
 from .timestamps import ClipBounds, normalize_clip_bounds
 from .transcription_status import (
@@ -689,9 +699,55 @@ def _render_analysis_job_status(db_path: Path, job: dict) -> None:
                 st.rerun()
 
 
+
+def _render_url_ingest(db_path: Path, *, disabled: bool = False) -> None:
+    """Fetch a VOD and its chat from a URL, then fill in the local file fields."""
+    with st.expander("Fetch from a URL", expanded=False):
+        st.caption(
+            f"Supported: {', '.join(SUPPORTED_PLATFORMS)}. The VOD and, where the platform "
+            "offers one, its chat replay are downloaded to the work folder and then "
+            "analyzed like any local file."
+        )
+        url = persistent_text_input(
+            "VOD URL",
+            "ingest_url_input",
+            placeholder="https://www.twitch.tv/videos/…",
+            disabled=disabled,
+        )
+        target = st.session_state.get("work_dir_input") or default_work_dir()
+        if st.button("Download", key="ingest_url_button", disabled=disabled or not url):
+            status = st.empty()
+            try:
+                with st.spinner("Fetching VOD…"):
+                    result = ingest(
+                        url,
+                        Path(target) / "vods",
+                        progress=lambda stage, frac, msg: status.write(f"{msg}…"),
+                    )
+            except IngestError as exc:
+                status.empty()
+                st.error(f"Could not fetch that URL: {exc}")
+            else:
+                status.empty()
+                # Fill the normal local-file fields, so everything downstream is
+                # identical to having picked the files by hand.
+                st.session_state["video_path_input"] = str(result.video_path)
+                if result.chat_path:
+                    st.session_state["chat_path_input"] = str(result.chat_path)
+                if result.info.uploader and not st.session_state.get("content_label_input"):
+                    st.session_state["content_label_input"] = result.info.uploader
+                if result.chat_error:
+                    st.info(f"No chat for this VOD: {result.chat_error}")
+                st.success(f"Downloaded {result.video_path.name}")
+                st.rerun()
+
+
 def _render_source_sidebar(db_path: Path, *, disabled: bool = False) -> tuple[str, str, str, str, str]:
     st.header("🎬 Source", anchor=False)
     st.caption("Choose local files directly. The VOD is read in place and never uploaded.")
+
+    _render_url_ingest(db_path, disabled=disabled)
+
     video_path = path_picker(
         "VOD",
         "video_path_input",
@@ -1169,6 +1225,22 @@ def _render_review(db_path: Path) -> None:
             st.exception(exc)
         else:
             try:
+                render_settings = load_app_settings(db_path)
+                preview_layout = layout_from_settings(render_settings)
+                preview_transcript = (
+                    transcript_window(db_path, analysis_id, preview_start, preview_end)
+                    if (preview_layout is not None and render_settings.burn_captions)
+                    else None
+                )
+                # Only pass render arguments when short-form output is on, so a
+                # plain source-aspect preview keeps the original call shape.
+                render_kwargs = {}
+                if preview_layout is not None:
+                    render_kwargs = {
+                        "layout": preview_layout,
+                        "transcript": preview_transcript,
+                        "caption_style": style_from_settings(render_settings),
+                    }
                 with st.spinner("Preparing lightweight preview…"):
                     preview = create_preview_clip(
                         source_video,
@@ -1176,6 +1248,7 @@ def _render_review(db_path: Path) -> None:
                         candidate["id"],
                         preview_start,
                         preview_end,
+                        **render_kwargs,
                     )
                 player_token = f"{preview_token}:{preview_start!r}:{preview_end!r}"
                 last_mark_key = f"last_mark_{preview_token}"
@@ -1312,6 +1385,20 @@ def _execute_export_queue(db_path: Path) -> None:
             )
             try:
                 source_video = validate_local_video(item["source_path"])
+                export_settings = load_app_settings(db_path)
+                export_layout = layout_from_settings(export_settings)
+                export_kwargs = {}
+                if export_layout is not None:
+                    export_kwargs = {
+                        "layout": export_layout,
+                        "transcript": (
+                            transcript_window(
+                                db_path, item["analysis_id"], item["start"], item["end"]
+                            )
+                            if export_settings.burn_captions else None
+                        ),
+                        "caption_style": style_from_settings(export_settings),
+                    }
                 output = export_clip(
                     source_video,
                     item["export_dir"],
@@ -1320,6 +1407,7 @@ def _execute_export_queue(db_path: Path) -> None:
                     item["end"],
                     item.get("title") or None,
                     category=item.get("content_label"),
+                    **export_kwargs,
                 )
                 complete_export_queue_item(db_path, batch_id, item["id"], output)
             except Exception as exc:

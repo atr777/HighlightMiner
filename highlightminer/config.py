@@ -15,6 +15,7 @@ _STANDARD_WHISPER_MODELS = {
     "distil-small.en", "distil-medium.en", "distil-large-v2", "distil-large-v3",
 }
 _ALLOWED_DEVICES = {"auto", "cpu", "cuda"}
+_ALLOWED_RENDER_LAYOUTS = {"source", "letterbox", "crop", "webcam"}
 _ALLOWED_COMPUTE_TYPES = {
     "auto", "int8", "int8_float16", "int8_float32", "int8_bfloat16",
     "float16", "float32", "bfloat16",
@@ -40,6 +41,12 @@ class Settings:
     min_candidate_score: float = 0.38
     max_candidates: int = 40
     short_form_mode: bool = False
+    render_layout: str = "source"
+    burn_captions: bool = False
+    caption_font_size: int = 96
+    caption_uppercase: bool = False
+    webcam_fraction: float = 0.3
+    webcam_rect: dict[str, float] | None = None
     audio_only_penalty: float = 1.0
     duplicate_containment: float = 0.65
     cpu_threads: int = 0
@@ -89,6 +96,25 @@ class Settings:
             self.language = str(self.language).strip() or None
             if self.language and len(self.language) > 32:
                 raise ValueError("language is unexpectedly long.")
+
+        self.render_layout = str(self.render_layout).lower().strip()
+        if self.render_layout not in _ALLOWED_RENDER_LAYOUTS:
+            raise ValueError(f"render_layout must be one of {sorted(_ALLOWED_RENDER_LAYOUTS)}")
+        self.caption_font_size = int(self.caption_font_size)
+        if not 16 <= self.caption_font_size <= 400:
+            raise ValueError("caption_font_size must be between 16 and 400.")
+        self.webcam_fraction = float(self.webcam_fraction)
+        if not 0.05 <= self.webcam_fraction <= 0.95:
+            raise ValueError("webcam_fraction must be between 0.05 and 0.95.")
+        if self.webcam_rect is not None:
+            if not isinstance(self.webcam_rect, dict):
+                raise ValueError("webcam_rect must be a JSON object or null.")
+            self.webcam_rect = {
+                key: float(self.webcam_rect.get(key, default))
+                for key, default in (("x", 0.0), ("y", 0.0), ("w", 1.0), ("h", 1.0))
+            }
+        if self.render_layout == "webcam" and not self.webcam_rect:
+            raise ValueError("The webcam layout needs webcam_rect to be set.")
 
         self.beam_size = int(self.beam_size)
         self.cpu_threads = int(self.cpu_threads)

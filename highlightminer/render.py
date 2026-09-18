@@ -244,3 +244,16 @@ def escape_filter_path(path: str) -> str:
     # but a stray apostrophe would otherwise end the quoted value early.
     escaped = escaped.replace("'", r"'\''")
     return f"'{escaped}'"
+
+
+def layout_from_settings(settings) -> Layout | None:
+    """Build the Layout a settings profile describes, or None for source aspect."""
+    kind = getattr(settings, "render_layout", "source")
+    if kind == "source":
+        return None
+    rect = getattr(settings, "webcam_rect", None)
+    return Layout(
+        kind=kind,
+        webcam=Rect.from_dict(rect) if rect else None,
+        webcam_fraction=float(getattr(settings, "webcam_fraction", 0.3)),
+    )

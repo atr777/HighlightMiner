@@ -226,3 +226,11 @@ def write_ass(
     # UTF-8 with BOM: libass is more reliable about detecting encoding with one.
     out.write_text(build_ass(words, style, width, height), encoding="utf-8-sig")
     return out
+
+
+def style_from_settings(settings) -> CaptionStyle:
+    """Build the CaptionStyle a settings profile describes."""
+    return CaptionStyle(
+        size=int(getattr(settings, "caption_font_size", 96)),
+        uppercase=bool(getattr(settings, "caption_uppercase", False)),
+    )

@@ -9,6 +9,9 @@ import streamlit as st
 from .config import Settings, _STANDARD_WHISPER_MODELS
 from .runtime import app_root
 from .settings_presets import (
+    TIMING_PRESETS,
+    apply_timing_preset,
+    detect_timing_preset,
     WEIGHT_PRESETS,
     detect_weight_preset,
     normalize_weights,
@@ -39,6 +42,27 @@ _EDITOR_KEYS = {
     "chat_weight": "cfg_chat_weight",
     "reactions": "cfg_reactions",
     "preset": "cfg_preset",
+    "timing_preset": "cfg_timing_preset",
+    "short_form": "cfg_short_form",
+    "hook_lead": "cfg_hook_lead",
+    "min_clip": "cfg_min_clip",
+    "speech_snap": "cfg_speech_snap",
+    "render_layout": "cfg_render_layout",
+    "burn_captions": "cfg_burn_captions",
+    "caption_size": "cfg_caption_size",
+    "caption_upper": "cfg_caption_upper",
+    "webcam_fraction": "cfg_webcam_fraction",
+    "audio_only_penalty": "cfg_audio_only_penalty",
+    "duplicate_containment": "cfg_duplicate_containment",
+    "chat_quiet": "cfg_chat_quiet",
+    "chat_active": "cfg_chat_active",
+    "chat_burst": "cfg_chat_burst",
+    "cpu_threads": "cfg_cpu_threads",
+    "webcam_x": "cfg_webcam_x",
+    "webcam_y": "cfg_webcam_y",
+    "webcam_w": "cfg_webcam_w",
+    "webcam_h": "cfg_webcam_h",
+    "webcam_enabled": "cfg_webcam_enabled",
 }
 
 _PRIMARY_WHISPER_MODELS = ("large-v3", "turbo", "medium", "small")
@@ -82,9 +106,66 @@ def _seed_editor(settings: Settings, *, force: bool = False) -> None:
         "chat_weight": normalized["chat"],
         "reactions": "\n".join(settings.reaction_phrases),
         "preset": detect_weight_preset(normalized),
+        "timing_preset": detect_timing_preset(settings),
+        "short_form": bool(settings.short_form_mode),
+        "hook_lead": float(settings.hook_lead_sec),
+        "min_clip": float(settings.min_candidate_sec),
+        "speech_snap": float(settings.speech_snap_sec),
+        "render_layout": settings.render_layout,
+        "burn_captions": bool(settings.burn_captions),
+        "caption_size": int(settings.caption_font_size),
+        "caption_upper": bool(settings.caption_uppercase),
+        "webcam_fraction": float(settings.webcam_fraction),
+        "audio_only_penalty": float(settings.audio_only_penalty),
+        "duplicate_containment": float(settings.duplicate_containment),
+        "chat_quiet": float(settings.chat_quiet_msgs_per_min),
+        "chat_active": float(settings.chat_active_msgs_per_min),
+        "chat_burst": float(settings.chat_min_burst_messages),
+        "cpu_threads": int(settings.cpu_threads),
+        "webcam_enabled": settings.webcam_rect is not None,
+        "webcam_x": float((settings.webcam_rect or {}).get("x", 0.70)),
+        "webcam_y": float((settings.webcam_rect or {}).get("y", 0.0)),
+        "webcam_w": float((settings.webcam_rect or {}).get("w", 0.30)),
+        "webcam_h": float((settings.webcam_rect or {}).get("h", 0.30)),
     }
     for name, value in values.items():
         st.session_state[_EDITOR_KEYS[name]] = value
+
+
+
+def _editor_webcam_rect() -> dict[str, float] | None:
+    """The webcam rectangle, or None when the layout does not use one."""
+    if not st.session_state.get(_EDITOR_KEYS["webcam_enabled"]):
+        return None
+    return {
+        "x": float(st.session_state[_EDITOR_KEYS["webcam_x"]]),
+        "y": float(st.session_state[_EDITOR_KEYS["webcam_y"]]),
+        "w": float(st.session_state[_EDITOR_KEYS["webcam_w"]]),
+        "h": float(st.session_state[_EDITOR_KEYS["webcam_h"]]),
+    }
+
+
+def _apply_timing_preset_to_editor() -> None:
+    """Copy a chosen timing preset into the editor fields."""
+    name = st.session_state.get(_EDITOR_KEYS["timing_preset"], "Review")
+    preset = TIMING_PRESETS.get(name)
+    if not preset:
+        return
+    mapping = {
+        "short_form_mode": "short_form",
+        "pre_roll_sec": "pre_roll",
+        "post_roll_sec": "post_roll",
+        "max_candidate_sec": "max_clip",
+        "min_candidate_sec": "min_clip",
+        "hook_lead_sec": "hook_lead",
+        "min_candidate_score": "min_score",
+        "max_candidates": "max_candidates",
+        "audio_only_penalty": "audio_only_penalty",
+        "duplicate_containment": "duplicate_containment",
+    }
+    for field, editor_name in mapping.items():
+        if field in preset:
+            st.session_state[_EDITOR_KEYS[editor_name]] = preset[field]
 
 
 def _request_reload(message: str) -> None:
@@ -149,6 +230,22 @@ def _build_settings() -> Settings:
         max_candidates=int(st.session_state[_EDITOR_KEYS["max_candidates"]]),
         weights=_editor_weights(),
         reaction_phrases=phrases,
+        short_form_mode=bool(st.session_state[_EDITOR_KEYS["short_form"]]),
+        hook_lead_sec=float(st.session_state[_EDITOR_KEYS["hook_lead"]]),
+        min_candidate_sec=float(st.session_state[_EDITOR_KEYS["min_clip"]]),
+        speech_snap_sec=float(st.session_state[_EDITOR_KEYS["speech_snap"]]),
+        render_layout=str(st.session_state[_EDITOR_KEYS["render_layout"]]),
+        burn_captions=bool(st.session_state[_EDITOR_KEYS["burn_captions"]]),
+        caption_font_size=int(st.session_state[_EDITOR_KEYS["caption_size"]]),
+        caption_uppercase=bool(st.session_state[_EDITOR_KEYS["caption_upper"]]),
+        webcam_fraction=float(st.session_state[_EDITOR_KEYS["webcam_fraction"]]),
+        webcam_rect=_editor_webcam_rect(),
+        audio_only_penalty=float(st.session_state[_EDITOR_KEYS["audio_only_penalty"]]),
+        duplicate_containment=float(st.session_state[_EDITOR_KEYS["duplicate_containment"]]),
+        chat_quiet_msgs_per_min=float(st.session_state[_EDITOR_KEYS["chat_quiet"]]),
+        chat_active_msgs_per_min=float(st.session_state[_EDITOR_KEYS["chat_active"]]),
+        chat_min_burst_messages=float(st.session_state[_EDITOR_KEYS["chat_burst"]]),
+        cpu_threads=int(st.session_state[_EDITOR_KEYS["cpu_threads"]]),
     )
 
 
@@ -168,7 +265,9 @@ def render_settings_page(db_path: Path) -> None:
     if notice:
         st.success(notice)
 
-    engine, detection, reactions, transfer = st.tabs(["Analysis engine", "Detection & weights", "Reaction phrases", "Import / Export"])
+    engine, detection, shortform, reactions, transfer = st.tabs(
+        ["Analysis engine", "Detection & weights", "Short form", "Reaction phrases", "Import / Export"]
+    )
 
     with engine:
         render_model_access_settings(db_path)
@@ -259,6 +358,140 @@ def render_settings_page(db_path: Path) -> None:
             st.number_input("Maximum clip length (seconds)", min_value=1.0, max_value=1800.0, step=1.0, key=_EDITOR_KEYS["max_clip"])
             st.number_input("Audio window (seconds)", min_value=0.1, max_value=10.0, step=0.1, key=_EDITOR_KEYS["audio_window"])
             st.number_input("Audio hop (seconds)", min_value=0.05, max_value=5.0, step=0.05, key=_EDITOR_KEYS["audio_hop"])
+
+
+    with shortform:
+        st.caption(
+            "Short-form clips need the payoff in the first few seconds and a 9:16 frame. "
+            "Timing presets only change clip shaping; signal weights and Whisper options are chosen separately."
+        )
+
+        st.selectbox(
+            "Timing preset",
+            list(TIMING_PRESETS) ,
+            key=_EDITOR_KEYS["timing_preset"],
+            on_change=_apply_timing_preset_to_editor,
+            help="Review keeps generous context for judging a moment. Short-form trims to the hook.",
+        )
+
+        st.subheader("Clip shaping", anchor=False)
+        st.toggle(
+            "Reshape candidates for short form",
+            key=_EDITOR_KEYS["short_form"],
+            help=(
+                "Trims so the peak lands near the front and snaps clip edges to speech "
+                "boundaries, so a clip does not open or end mid-word."
+            ),
+        )
+        s1, s2 = st.columns(2)
+        with s1:
+            st.number_input(
+                "Hook lead (seconds)", min_value=0.0, max_value=60.0, step=0.5,
+                key=_EDITOR_KEYS["hook_lead"],
+                help="How far into the clip the peak moment should land.",
+            )
+            st.number_input(
+                "Minimum clip length (seconds)", min_value=1.0, max_value=600.0, step=1.0,
+                key=_EDITOR_KEYS["min_clip"],
+            )
+        with s2:
+            st.number_input(
+                "Speech snap tolerance (seconds)", min_value=0.0, max_value=30.0, step=0.1,
+                key=_EDITOR_KEYS["speech_snap"],
+            )
+            st.slider(
+                "Uncorroborated audio penalty", 0.0, 1.0, step=0.05,
+                key=_EDITOR_KEYS["audio_only_penalty"],
+                help=(
+                    "Score multiplier for loud moments nothing else corroborates. "
+                    "Mechanical noise such as PC fans reads as excitement to the audio detector. "
+                    "1.00 applies no penalty."
+                ),
+            )
+
+        st.subheader("Vertical output", anchor=False)
+        st.selectbox(
+            "Layout",
+            ["source", "letterbox", "crop", "webcam"],
+            key=_EDITOR_KEYS["render_layout"],
+            help=(
+                "source keeps the original aspect. letterbox centres it over a blurred copy "
+                "and works on anything. crop takes the centre 9:16 slice. "
+                "webcam stacks a cam region above the gameplay."
+            ),
+        )
+        if st.session_state[_EDITOR_KEYS["render_layout"]] == "crop":
+            st.caption(
+                "A centred 9:16 crop keeps about 28% of a 16:9 width, so minimaps and "
+                "kill feeds near the edges are lost. Check it against real footage."
+            )
+
+        if st.session_state[_EDITOR_KEYS["render_layout"]] == "webcam":
+            st.toggle("Webcam region set", key=_EDITOR_KEYS["webcam_enabled"])
+            st.caption(
+                "Fractions of the source frame, so one rectangle works for every VOD from "
+                "a channel. A stream overlay never moves, so this is drawn once, not detected per frame."
+            )
+            w1, w2, w3, w4 = st.columns(4)
+            w1.number_input("x", min_value=0.0, max_value=1.0, step=0.01, key=_EDITOR_KEYS["webcam_x"])
+            w2.number_input("y", min_value=0.0, max_value=1.0, step=0.01, key=_EDITOR_KEYS["webcam_y"])
+            w3.number_input("width", min_value=0.01, max_value=1.0, step=0.01, key=_EDITOR_KEYS["webcam_w"])
+            w4.number_input("height", min_value=0.01, max_value=1.0, step=0.01, key=_EDITOR_KEYS["webcam_h"])
+            st.slider(
+                "Webcam share of frame height", 0.05, 0.95, step=0.05,
+                key=_EDITOR_KEYS["webcam_fraction"],
+            )
+
+        st.subheader("Captions", anchor=False)
+        st.toggle(
+            "Burn captions into exports",
+            key=_EDITOR_KEYS["burn_captions"],
+            help="Needs a vertical layout; captions are burned during reframing.",
+        )
+        c1, c2 = st.columns(2)
+        c1.number_input(
+            "Caption size", min_value=16, max_value=400, step=4, key=_EDITOR_KEYS["caption_size"]
+        )
+        c2.toggle("Uppercase captions", key=_EDITOR_KEYS["caption_upper"])
+        if (
+            st.session_state[_EDITOR_KEYS["burn_captions"]]
+            and st.session_state[_EDITOR_KEYS["render_layout"]] == "source"
+        ):
+            st.warning("Captions need a vertical layout. Pick one above, or exports stay uncaptioned.")
+
+        st.subheader("Chat signal", anchor=False)
+        st.caption(
+            "The burst detector is relative, so on a quiet chat a single message can look "
+            "like a maximum burst. These thresholds require absolute volume before chat counts."
+        )
+        q1, q2, q3 = st.columns(3)
+        q1.number_input(
+            "Ignore chat below (msgs/min)", min_value=0.0, max_value=1000.0, step=1.0,
+            key=_EDITOR_KEYS["chat_quiet"],
+        )
+        q2.number_input(
+            "Full strength at (msgs/min)", min_value=0.0, max_value=5000.0, step=5.0,
+            key=_EDITOR_KEYS["chat_active"],
+        )
+        q3.number_input(
+            "Messages for a full burst", min_value=0.5, max_value=100.0, step=0.5,
+            key=_EDITOR_KEYS["chat_burst"],
+        )
+
+        st.subheader("Performance", anchor=False)
+        st.number_input(
+            "Transcription threads (0 = auto)", min_value=0, max_value=256, step=1,
+            key=_EDITOR_KEYS["cpu_threads"],
+            help=(
+                "Auto reserves a core so the desktop stays responsive. Unattended batch runs "
+                "override this and use the whole machine."
+            ),
+        )
+        st.slider(
+            "Duplicate containment", 0.1, 1.0, step=0.05,
+            key=_EDITOR_KEYS["duplicate_containment"],
+            help="How much two candidate windows must overlap before one is treated as a duplicate.",
+        )
 
     with reactions:
         st.caption("One phrase per line. These phrases score transcript reactions; changing them can reuse an existing Whisper transcript and simply rescore its text.")
