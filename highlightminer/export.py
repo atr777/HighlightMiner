@@ -125,6 +125,38 @@ def _run_encode(command: list[str], *, encoder: str) -> None:
     log_detailed("encoder.complete", encoder=encoder, exit_code=0)
 
 
+# Hardware encoders are tried in order, then libx264 as the guaranteed fallback.
+# ffmpeg advertising an encoder does not mean usable hardware exists behind it:
+# a build with NVENC compiled in still lists h264_nvenc on a machine with an AMD
+# card, and only fails once it actually tries to open a session. So every entry
+# stays inside the same try/except and falls through on failure.
+_HARDWARE_ENCODERS: tuple[tuple[str, list[str], list[str]], ...] = (
+    (
+        "h264_nvenc",
+        ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "3M", "-maxrate", "4M", "-bufsize", "8M"],
+        ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "19"],
+    ),
+    (
+        "h264_amf",
+        ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "26", "-qp_p", "26"],
+        ["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "20", "-qp_p", "20"],
+    ),
+    (
+        "h264_qsv",
+        ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "26"],
+        ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "20"],
+    ),
+)
+
+_SOFTWARE_ENCODER = (
+    "libx264",
+    ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26"],
+    ["-c:v", "libx264", "-preset", "medium", "-crf", "18"],
+)
+
+_PREVIEW_SCALE_FILTER = "scale='min(1280,iw)':-2,fps=30"
+
+
 def _run_h264_encode(
     ffmpeg: str,
     src: Path,
@@ -133,7 +165,14 @@ def _run_h264_encode(
     duration: float,
     *,
     preview: bool = False,
+    video_filters: str | None = None,
+    extra_inputs: list[str] | None = None,
 ) -> None:
+    """Encode one clip, preferring hardware acceleration where it actually works.
+
+    ``video_filters`` replaces the default preview downscale when given, which is
+    how vertical reframing and burned captions are applied.
+    """
     common = [
         ffmpeg,
         "-hide_banner",
@@ -144,6 +183,7 @@ def _run_h264_encode(
         f"{float(start):.3f}",
         "-i",
         str(src),
+        *(extra_inputs or []),
         "-t",
         f"{duration:.3f}",
         "-map",
@@ -152,10 +192,13 @@ def _run_h264_encode(
         "0:a:0?",
     ]
 
-    if preview:
-        common += ["-vf", "scale='min(1280,iw)':-2,fps=30"]
+    filters = video_filters if video_filters is not None else (_PREVIEW_SCALE_FILTER if preview else None)
+    if filters:
+        common += ["-vf", filters]
 
-    def finish(video_args: list[str], audio_bitrate: str) -> list[str]:
+    audio_bitrate = "128k" if preview else "192k"
+
+    def finish(video_args: list[str]) -> list[str]:
         return [
             *common,
             *video_args,
@@ -168,42 +211,35 @@ def _run_h264_encode(
             str(out),
         ]
 
-    if has_encoder("h264_nvenc"):
+    candidates = [
+        (name, preview_args if preview else final_args)
+        for name, preview_args, final_args in _HARDWARE_ENCODERS
+        if has_encoder(name)
+    ]
+    software_name, software_preview, software_final = _SOFTWARE_ENCODER
+
+    for index, (name, video_args) in enumerate(candidates):
+        next_encoder = candidates[index + 1][0] if index + 1 < len(candidates) else software_name
         try:
-            if preview:
-                video_args = [
-                    "-c:v", "h264_nvenc", "-preset", "p4",
-                    "-b:v", "3M", "-maxrate", "4M", "-bufsize", "8M",
-                ]
-                audio_bitrate = "128k"
-            else:
-                video_args = ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "19"]
-                audio_bitrate = "192k"
-            log_detailed("encoder.selection", encoder="h264_nvenc", preview=preview)
-            _run_encode(finish(video_args, audio_bitrate), encoder="h264_nvenc")
+            log_detailed("encoder.selection", encoder=name, preview=preview)
+            _run_encode(finish(video_args), encoder=name)
             return
         except subprocess.CalledProcessError:
             log_event(
                 "encoder.fallback",
                 level=logging.WARNING,
-                from_encoder="h264_nvenc",
-                to_encoder="libx264",
+                from_encoder=name,
+                to_encoder=next_encoder,
                 preview=preview,
             )
             out.unlink(missing_ok=True)
 
-    if preview:
-        video_args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26"]
-        audio_bitrate = "128k"
-    else:
-        video_args = ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
-        audio_bitrate = "192k"
-
-    log_detailed("encoder.selection", encoder="libx264", preview=preview)
+    video_args = software_preview if preview else software_final
+    log_detailed("encoder.selection", encoder=software_name, preview=preview)
     try:
-        _run_encode(finish(video_args, audio_bitrate), encoder="libx264")
+        _run_encode(finish(video_args), encoder=software_name)
     except subprocess.CalledProcessError as exc:
-        log_exception("encoder.error", exc, encoder="libx264", preview=preview)
+        log_exception("encoder.error", exc, encoder=software_name, preview=preview)
         raise
 
 
