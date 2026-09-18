@@ -1,5 +1,5 @@
 {
-  "whisper_model": "turbo",
+  "whisper_model": "large-v3",
   "allow_custom_whisper_model": false,
   "device": "auto",
   "compute_type": "auto",
