@@ -69,6 +69,7 @@ from .storage import (
 )
 from .shutdown import active_work_shutdown_block_reason
 from .timestamps import ClipBounds, normalize_clip_bounds
+from .titles import suggest_title
 from .transcription_status import (
     SKIP_REASON_MODEL_DOWNLOADS_DISABLED,
     is_transcription_skipped,
@@ -1302,7 +1303,20 @@ def _render_review(db_path: Path) -> None:
         preview_slot.empty()
         st.rerun()
 
-    title = st.text_input("Optional clip title", value=item.get("title", ""), key=f"title_{analysis_id}_{candidate['id']}")
+    # A suggestion, not a default: filling the field would make every clip look
+    # deliberately titled when it is really just the loudest line in the window.
+    suggested = suggest_title(
+        transcript_window(db_path, analysis_id, candidate["start"], candidate["end"]),
+        candidate["start"],
+        candidate["end"],
+        fallback="",
+    )
+    title = st.text_input(
+        "Optional clip title",
+        value=item.get("title", ""),
+        placeholder=suggested or "Untitled clips keep their candidate ID",
+        key=f"title_{analysis_id}_{candidate['id']}",
+    )
     st.caption(f"Signals — audio {candidate['audio_score']:.2f} · transcript {candidate['transcript_score']:.2f} · chat {candidate['chat_score']:.2f}")
     if candidate.get("transcript"):
         with st.expander("Transcript around this moment", expanded=True):
