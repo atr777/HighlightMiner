@@ -151,6 +151,9 @@ def _stage_signatures(
             "language": settings.language,
             "beam_size": settings.beam_size,
             "vad_filter": settings.vad_filter,
+            # A transcript without word timings cannot produce captions, so it
+            # must not satisfy a run that needs them.
+            "word_timestamps": settings.word_timestamps,
         },
     )
     # The chat signature covers the scoring parameters as well as the file,

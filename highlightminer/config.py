@@ -30,6 +30,7 @@ class Settings:
     language: str | None = None
     beam_size: int = 5
     vad_filter: bool = True
+    word_timestamps: bool = True
     audio_window_sec: float = 1.0
     audio_hop_sec: float = 0.5
     pre_roll_sec: float = 18.0

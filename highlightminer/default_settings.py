@@ -25,6 +25,7 @@ def product_default_settings() -> Settings:
         language=None,
         beam_size=5,
         vad_filter=True,
+        word_timestamps=True,
         audio_window_sec=1.0,
         audio_hop_sec=0.5,
         pre_roll_sec=18.0,

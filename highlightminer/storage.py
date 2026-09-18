@@ -291,6 +291,7 @@ def initialize(conn: sqlite3.Connection) -> None:
         "last_run_number INTEGER NOT NULL DEFAULT 0",
     )
     _ensure_column(conn, "candidates", "features_json TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(conn, "transcript_segments", "words_json TEXT NOT NULL DEFAULT '[]'")
     if source_counter_added:
         conn.execute(
             """
@@ -510,7 +511,7 @@ def _feature_rows(conn: sqlite3.Connection, table: str, analysis_id: str) -> lis
         ).fetchall()
     elif table == "transcript_segments":
         rows = conn.execute(
-            "SELECT start, end, text, score, reasons_json FROM transcript_segments WHERE analysis_id = ? ORDER BY seq",
+            "SELECT start, end, text, score, reasons_json, words_json FROM transcript_segments WHERE analysis_id = ? ORDER BY seq",
             (analysis_id,),
         ).fetchall()
         return [
@@ -520,6 +521,7 @@ def _feature_rows(conn: sqlite3.Connection, table: str, analysis_id: str) -> lis
                 "text": row["text"],
                 "score": float(row["score"]),
                 "reasons": _unjson(row["reasons_json"], []),
+                "words": _unjson(row["words_json"], []),
             }
             for row in rows
         ]
@@ -717,8 +719,8 @@ def save_analysis(
         conn.executemany(
             """
             INSERT INTO transcript_segments(
-                analysis_id, seq, start, end, text, score, reasons_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                analysis_id, seq, start, end, text, score, reasons_json, words_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -729,6 +731,7 @@ def save_analysis(
                     str(row.get("text", "")),
                     float(row.get("score", 0.0)),
                     _json(row.get("reasons", [])),
+                    _json(row.get("words", [])),
                 )
                 for i, row in enumerate(transcript_rows)
             ],
@@ -988,7 +991,7 @@ def transcript_window(
     with connect(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT start, end, text, score, reasons_json
+            SELECT start, end, text, score, reasons_json, words_json
             FROM transcript_segments
             WHERE analysis_id = ? AND end >= ? AND start <= ?
             ORDER BY seq
@@ -1002,6 +1005,7 @@ def transcript_window(
             "text": r["text"],
             "score": float(r["score"]),
             "reasons": _unjson(r["reasons_json"], []),
+            "words": _unjson(r["words_json"], []),
         }
         for r in rows
     ]

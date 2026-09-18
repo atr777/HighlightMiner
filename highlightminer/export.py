@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .captions import CaptionStyle, words_in_window, write_ass
 from .categorization import content_folder_name
 from .diagnostics import ffmpeg_failure, log_detailed, log_event, log_exception
 from .media import has_encoder, probe_media, require_executable, require_ffmpeg
+from .render import Layout, build_filter, escape_filter_path
 from .timestamps import ClipBounds, normalize_clip_bounds
 from .util import ensure_dir
 
@@ -243,13 +247,45 @@ def _run_h264_encode(
         raise
 
 
+def _render_cache_key(
+    layout: Layout | None,
+    caption_style: CaptionStyle | None,
+    captioned: bool,
+) -> str:
+    """Short digest of the render configuration, for the preview cache key.
+
+    Without this, switching layout or caption style would silently redisplay a
+    preview rendered with the previous settings.
+    """
+    if layout is None and not captioned:
+        return ""
+    payload = json.dumps(
+        {
+            "layout": layout.as_dict() if layout else None,
+            "captions": asdict(caption_style) if caption_style else None,
+            "captioned": captioned,
+        },
+        sort_keys=True,
+    )
+    return "_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
+
+
 def create_preview_clip(
     video_path: str | Path,
     output_dir: str | Path,
     clip_id: str,
     start: float,
     end: float,
+    layout: Layout | None = None,
+    transcript: list[dict] | None = None,
+    caption_style: CaptionStyle | None = None,
 ) -> PreviewClipResult:
+    """Render a small preview of one candidate.
+
+    Passing a ``layout`` previews what will actually be exported: reframed to
+    9:16 and, with a ``transcript``, captioned. Reviewing a source-aspect clip
+    means judging a different artifact from the one being shipped.
+    """
     require_ffmpeg()
     ffmpeg = require_executable("ffmpeg")
     src = Path(video_path).expanduser().resolve()
@@ -262,6 +298,7 @@ def create_preview_clip(
 
     stem = safe_name(clip_id)
     signature = f"{start:.3f}_{end:.3f}".replace(".", "_")
+    signature += _render_cache_key(layout, caption_style, transcript is not None)
     out = out_dir / f"{stem}_{signature}.mp4"
     partial = out.with_name(f".{out.stem}.partial{out.suffix}")
 
@@ -275,8 +312,12 @@ def create_preview_clip(
 
         if not _retry_unlink(partial):
             raise PreviewFileLockError("Could not remove an incomplete preview from an earlier attempt.")
+        video_filters, subtitle_path = build_short_form_args(
+            partial, start, end, layout, transcript, caption_style
+        )
+        extra = {"video_filters": video_filters} if video_filters is not None else {}
         try:
-            _run_h264_encode(ffmpeg, src, partial, start, duration, preview=True)
+            _run_h264_encode(ffmpeg, src, partial, start, duration, preview=True, **extra)
             try:
                 partial.replace(out)
             except PermissionError as exc:
@@ -284,8 +325,38 @@ def create_preview_clip(
         except Exception:
             _retry_unlink(partial)
             raise
+        finally:
+            if subtitle_path is not None:
+                subtitle_path.unlink(missing_ok=True)
         cleanup_failures = _prune_preview_files(out_dir, stem, keep_path=out)
         return PreviewClipResult(out, cleanup_failures)
+
+
+def build_short_form_args(
+    out: Path,
+    start: float,
+    end: float,
+    layout: Layout | None,
+    transcript: list[dict] | None,
+    caption_style: CaptionStyle | None,
+) -> tuple[str | None, Path | None]:
+    """Work out the filter chain for a vertical export, writing captions if asked.
+
+    Returns ``(video_filters, subtitle_path)``. ``video_filters`` is None when no
+    layout was requested, which leaves the source-aspect behaviour untouched.
+    """
+    if layout is None:
+        return None, None
+
+    subtitle_path: Path | None = None
+    escaped: str | None = None
+    if transcript is not None:
+        words = words_in_window(transcript, float(start), float(end))
+        if words:
+            subtitle_path = write_ass(out.with_suffix(".ass"), words, caption_style)
+            escaped = escape_filter_path(str(subtitle_path))
+
+    return build_filter(layout, subtitles=escaped), subtitle_path
 
 
 def export_clip(
@@ -296,8 +367,17 @@ def export_clip(
     end: float,
     title: str | None = None,
     category: str | None = None,
+    layout: Layout | None = None,
+    transcript: list[dict] | None = None,
+    caption_style: CaptionStyle | None = None,
+    keep_subtitle_file: bool = False,
 ) -> Path:
-    """Export a clip without silently overwriting an older export."""
+    """Export a clip without silently overwriting an older export.
+
+    Passing a ``layout`` switches to short-form output: reframed to 9:16 and,
+    when ``transcript`` is supplied, with captions burned in. Omitting it keeps
+    the original source-aspect behaviour.
+    """
     require_ffmpeg()
     ffmpeg = require_executable("ffmpeg")
     src = Path(video_path).expanduser().resolve()
@@ -310,6 +390,19 @@ def export_clip(
     stem = safe_name(title if title else clip_id)
     out = _non_overwriting_path(out_dir / f"{stem}.mp4")
 
-    _run_h264_encode(ffmpeg, src, out, bounds.start, duration, preview=False)
+    video_filters, subtitle_path = build_short_form_args(
+        out, bounds.start, bounds.end, layout, transcript, caption_style
+    )
+
+    # Only pass the filter argument when short-form output was actually asked
+    # for, so a plain source-aspect export keeps the original call shape.
+    extra = {"video_filters": video_filters} if video_filters is not None else {}
+    try:
+        _run_h264_encode(ffmpeg, src, out, bounds.start, duration, preview=False, **extra)
+    finally:
+        # The subtitles are burned into the video, so the sidecar is scaffolding.
+        if subtitle_path is not None and not keep_subtitle_file:
+            subtitle_path.unlink(missing_ok=True)
+
     log_event("export.complete", count=1)
     return out

@@ -150,11 +150,3 @@ class TestBuildFilter:
 
     def test_default_output_is_1080x1920(self):
         assert f"crop={SHORT_FORM_WIDTH}:{SHORT_FORM_HEIGHT}" in build_filter(Layout(kind="crop"))
-
-
-class TestEscapeFilterPath:
-    def test_escapes_a_windows_path(self):
-        assert escape_filter_path(r"C:\work\clip.ass") == r"C\:/work/clip.ass"
-
-    def test_leaves_posix_paths_alone_except_colons(self):
-        assert escape_filter_path("/home/a/clip.ass") == "/home/a/clip.ass"

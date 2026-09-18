@@ -184,6 +184,30 @@ def score_text(text: str, reaction_phrases: list[str]) -> tuple[float, list[str]
     return clamp(score), reasons
 
 
+def _segment_words(segment: object, seg_start: float, seg_end: float) -> list[dict]:
+    """Extract per-word timings, when the model was asked for them.
+
+    Captions need word timing, and tighter clip boundaries fall out of it for
+    free. Whisper occasionally emits a word whose timings are missing or run
+    backwards, so each one is clamped into its own segment rather than trusted.
+    """
+    words = getattr(segment, "words", None) or []
+    out: list[dict] = []
+    for word in words:
+        text = getattr(word, "word", None)
+        text = "" if text is None else str(text).strip()
+        if not text:
+            continue
+        start = _safe_float(getattr(word, "start", None))
+        end = _safe_float(getattr(word, "end", None))
+        if start is None or end is None:
+            continue
+        start = min(max(start, seg_start), seg_end)
+        end = min(max(end, start), seg_end)
+        out.append({"w": text, "s": round(start, 3), "e": round(end, 3)})
+    return out
+
+
 def transcribe_audio(
     audio_path: str | Path,
     settings: Settings,
@@ -275,7 +299,7 @@ def transcribe_audio(
     kwargs = {
         "beam_size": int(settings.beam_size),
         "vad_filter": bool(settings.vad_filter),
-        "word_timestamps": False,
+        "word_timestamps": bool(settings.word_timestamps),
     }
     if settings.language:
         kwargs["language"] = settings.language
@@ -329,6 +353,7 @@ def transcribe_audio(
             "text": text,
             "score": round(score, 4),
             "reasons": reasons,
+            "words": _segment_words(seg, start, end),
         })
 
     elapsed_seconds = max(0.0, time.perf_counter() - started_at)
