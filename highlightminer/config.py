@@ -38,6 +38,9 @@ class Settings:
     max_candidate_sec: float = 75.0
     min_candidate_score: float = 0.38
     max_candidates: int = 40
+    chat_min_burst_messages: float = 3.0
+    chat_quiet_msgs_per_min: float = 15.0
+    chat_active_msgs_per_min: float = 60.0
     weights: dict[str, float] = field(default_factory=lambda: {
         "audio": 0.34, "transcript": 0.42, "chat": 0.24
     })
@@ -94,12 +97,20 @@ class Settings:
             "merge_gap_sec": (0.0, 600.0),
             "max_candidate_sec": (1.0, 1800.0),
             "min_candidate_score": (0.0, 1.0),
+            "chat_min_burst_messages": (0.5, 100.0),
+            "chat_quiet_msgs_per_min": (0.0, 1000.0),
+            "chat_active_msgs_per_min": (0.0, 5000.0),
         }
         for name, (low, high) in ranges.items():
             value = float(getattr(self, name))
             if not low <= value <= high:
                 raise ValueError(f"{name} must be between {low} and {high}.")
             setattr(self, name, value)
+
+        if self.chat_active_msgs_per_min < self.chat_quiet_msgs_per_min:
+            raise ValueError(
+                "chat_active_msgs_per_min must be greater than or equal to chat_quiet_msgs_per_min."
+            )
 
         if not isinstance(self.weights, dict):
             raise ValueError("weights must be a JSON object.")

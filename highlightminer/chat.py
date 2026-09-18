@@ -105,9 +105,51 @@ def load_chat(path: str | Path) -> list[dict]:
     return sorted(dedup.values(), key=lambda r: r["time"])
 
 
-def analyze_chat(records: list[dict], duration: float, bucket_sec: float = 1.0) -> list[dict]:
+def messages_per_minute(records: list[dict], duration: float) -> float:
+    """Average chat rate across the VOD."""
+    if not records or duration <= 0:
+        return 0.0
+    return len(records) / (float(duration) / 60.0)
+
+
+def volume_confidence(rate: float, quiet_rate: float, active_rate: float) -> float:
+    """How much a chat this busy deserves to be trusted, from 0.0 to 1.0.
+
+    The burst detector is purely relative: it compares each second against a
+    rolling baseline and then percentile-scales the result across the VOD. On a
+    quiet chat that scaling collapses, because most seconds hold zero messages,
+    so a single message becomes a maximum-confidence "burst". Relative evidence
+    needs an absolute sanity check before it can be believed.
+    """
+    if rate <= quiet_rate:
+        return 0.0
+    if active_rate <= quiet_rate or rate >= active_rate:
+        return 1.0
+    return float((rate - quiet_rate) / (active_rate - quiet_rate))
+
+
+def analyze_chat(
+    records: list[dict],
+    duration: float,
+    bucket_sec: float = 1.0,
+    min_burst_messages: float = 3.0,
+    quiet_msgs_per_min: float = 15.0,
+    active_msgs_per_min: float = 60.0,
+) -> list[dict]:
+    """Score chat activity per bucket, damped by how busy the chat actually is.
+
+    Returns an empty list when the chat is too quiet to carry signal. Callers
+    treat that exactly like "no chat supplied", so the audio and transcript
+    weights renormalize instead of being diluted by noise.
+    """
     if not records:
         return []
+
+    rate = messages_per_minute(records, duration)
+    confidence = volume_confidence(rate, quiet_msgs_per_min, active_msgs_per_min)
+    if confidence <= 0.0:
+        return []
+
     bucket_sec = max(0.25, float(bucket_sec))
     n = max(1, int(np.ceil(duration / bucket_sec)))
     counts = np.zeros(n, dtype=np.float32)
@@ -127,7 +169,15 @@ def analyze_chat(records: list[dict], duration: float, bucket_sec: float = 1.0) 
     p50 = float(np.percentile(ratio, 50))
     p97 = float(np.percentile(ratio, 97))
     span = max(1e-6, p97 - p50)
-    score = np.clip((ratio - p50) / span, 0.0, 1.0)
+    relative = np.clip((ratio - p50) / span, 0.0, 1.0)
+
+    # A burst must also be absolutely large, not merely larger than a quiet
+    # baseline. Two messages where the baseline is half a message is a ratio
+    # spike and nothing else.
+    min_burst = max(1e-6, float(min_burst_messages))
+    absolute = np.clip((counts - baseline) / min_burst, 0.0, 1.0)
+
+    score = relative * absolute * confidence
 
     return [
         {

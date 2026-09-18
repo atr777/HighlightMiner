@@ -27,7 +27,7 @@ from .analysis_jobs import (
 )
 from .audio import analyze_audio
 from .categorization import normalize_content_label
-from .chat import analyze_chat, load_chat
+from .chat import analyze_chat, load_chat, messages_per_minute
 from .config import Settings
 from .diagnostic_preferences import (
     consume_detailed_diagnostics_next_run,
@@ -153,14 +153,24 @@ def _stage_signatures(
             "vad_filter": settings.vad_filter,
         },
     )
+    # The chat signature covers the scoring parameters as well as the file,
+    # because changing the volume gate changes the features it produces.
+    chat_scoring = {
+        "min_burst_messages": settings.chat_min_burst_messages,
+        "quiet_msgs_per_min": settings.chat_quiet_msgs_per_min,
+        "active_msgs_per_min": settings.chat_active_msgs_per_min,
+    }
     if chat_path:
         validated_chat = validate_chat_file(chat_path)
         chat = stable_signature(
-            "highlightminer-chat-features-v1",
-            {"sha256": full_file_sha256(validated_chat)},
+            "highlightminer-chat-features-v2",
+            {"sha256": full_file_sha256(validated_chat), "scoring": chat_scoring},
         )
     else:
-        chat = stable_signature("highlightminer-chat-features-v1", {"chat": None})
+        chat = stable_signature(
+            "highlightminer-chat-features-v2",
+            {"chat": None, "scoring": chat_scoring},
+        )
     return {"audio": audio, "transcript": transcript, "chat": chat}
 
 
@@ -612,12 +622,29 @@ def analyze_vod(
                 stage_started_at = time.perf_counter()
                 with diagnostic_stage("chat_analysis"):
                     records = load_chat(validated_chat)
-                    chat_features = analyze_chat(records, duration)
+                    chat_features = analyze_chat(
+                        records,
+                        duration,
+                        min_burst_messages=settings.chat_min_burst_messages,
+                        quiet_msgs_per_min=settings.chat_quiet_msgs_per_min,
+                        active_msgs_per_min=settings.chat_active_msgs_per_min,
+                    )
                 timings["chat_analysis_seconds"] = _elapsed_since(stage_started_at)
+                rate = messages_per_minute(records, duration)
                 chat_info = {
                     "path": str(validated_chat),
                     "messages": len(records),
+                    "messages_per_minute": round(rate, 2),
+                    # Empty features mean the chat was too quiet to trust, which
+                    # downstream treats exactly like "no chat supplied".
+                    "volume_gated": bool(records) and not chat_features,
                 }
+                if chat_info["volume_gated"]:
+                    report(
+                        "chat_analysis",
+                        f"Chat too quiet to score ({rate:.1f} msgs/min), continuing without it",
+                        _TRANSCRIPTION_PROGRESS_END,
+                    )
             else:
                 report("chat_analysis", "Reusing cached chat features", 0.78)
                 chat_info = dict(chat_info or {})

@@ -33,6 +33,9 @@ def product_default_settings() -> Settings:
         max_candidate_sec=75.0,
         min_candidate_score=0.38,
         max_candidates=40,
+        chat_min_burst_messages=3.0,
+        chat_quiet_msgs_per_min=15.0,
+        chat_active_msgs_per_min=60.0,
         weights={"audio": 0.34, "transcript": 0.42, "chat": 0.24},
         reaction_phrases=list(_DEFAULT_REACTION_PHRASES),
     )
