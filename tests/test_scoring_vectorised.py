@@ -174,19 +174,31 @@ def test_malformed_segments_are_skipped():
 
 
 def test_scales_linearly_not_quadratically():
-    """An hour must not cost 25x what twelve minutes costs."""
+    """Six times the duration must cost roughly six times the work, not thirty six.
+
+    Timed rather than counted, so it takes the best of several runs. A single
+    wall-clock sample is meaningless on a machine that may be transcribing at
+    the same time, which is exactly how this test first flaked.
+    """
     import time
 
     settings = Settings()
 
-    def timed(duration):
+    def best_of(duration, repeats=5):
         audio = _audio(duration)
-        started = time.perf_counter()
-        build_timeline(duration, audio, [], [], settings)
-        return time.perf_counter() - started
+        samples = []
+        for _ in range(repeats):
+            started = time.perf_counter()
+            build_timeline(duration, audio, [], [], settings)
+            samples.append(time.perf_counter() - started)
+        return min(samples)
 
-    short = timed(720.0)
-    long = timed(3600.0)
-    # 5x the duration should be roughly 5x the work, not 25x. Allow generous
-    # slack for a loaded machine while still catching a return to quadratic.
-    assert long < short * 15, f"{short:.3f}s vs {long:.3f}s suggests superlinear scaling"
+    short = best_of(3600.0)
+    long = best_of(6 * 3600.0)
+
+    # Linear predicts about 6x, quadratic about 36x. 12x separates them with
+    # room for fixed overhead and a noisy machine.
+    assert long < short * 12, (
+        f"{short * 1000:.1f}ms for 1h vs {long * 1000:.1f}ms for 6h "
+        "suggests a return to superlinear scaling"
+    )
