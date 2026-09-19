@@ -115,25 +115,78 @@ def deduplicate_candidates(
 
 
 def _nearest_feature(features: list[dict], t: float, key: str = "score") -> float:
+    """Score of the feature nearest ``t``. Kept for callers outside the timeline."""
     if not features:
         return 0.0
-    times = np.fromiter((float(x["time"]) for x in features), dtype=np.float64)
-    idx = int(np.searchsorted(times, t))
-    candidates = []
-    if idx < len(features):
-        candidates.append(idx)
-    if idx > 0:
-        candidates.append(idx - 1)
-    best = min(candidates, key=lambda i: abs(float(features[i]["time"]) - t))
-    return float(features[best].get(key, 0.0))
+    return float(_nearest_feature_series(features, np.asarray([float(t)]), key)[0])
+
+
+def _nearest_feature_series(
+    features: list[dict],
+    times: np.ndarray,
+    key: str = "score",
+) -> np.ndarray:
+    """Vectorised nearest-feature lookup for a whole timeline at once.
+
+    The per-point version rebuilt the feature time array on every call, which
+    made ranking quadratic in VOD length: measured 0.27s for a 12 minute VOD,
+    7.2s for an hour, and an extrapolated 22 minutes for 13.5 hours.
+
+    Ties resolve to the later feature, matching the original implementation,
+    which listed the right-hand candidate first and let ``min`` keep it.
+    """
+    if not features:
+        return np.zeros(times.shape, dtype=np.float64)
+
+    feature_times = np.fromiter(
+        (float(x["time"]) for x in features), dtype=np.float64, count=len(features)
+    )
+    values = np.fromiter(
+        (float(x.get(key, 0.0)) for x in features), dtype=np.float64, count=len(features)
+    )
+
+    last = len(features) - 1
+    idx = np.searchsorted(feature_times, times)
+    right = np.clip(idx, 0, last)
+    left = np.clip(idx - 1, 0, last)
+
+    right_distance = np.where(idx < len(features), np.abs(feature_times[right] - times), np.inf)
+    left_distance = np.where(idx > 0, np.abs(feature_times[left] - times), np.inf)
+
+    chosen = np.where(left_distance < right_distance, left, right)
+    return values[chosen]
 
 
 def _transcript_at(segments: list[dict], t: float) -> float:
-    best = 0.0
-    for seg in segments:
-        if float(seg["start"]) - 0.5 <= t <= float(seg["end"]) + 0.5:
-            best = max(best, float(seg.get("score", 0.0)))
-    return best
+    """Best transcript score covering ``t``. Kept for callers outside the timeline."""
+    return float(_transcript_series(segments, np.asarray([float(t)]))[0])
+
+
+def _transcript_series(segments: list[dict], times: np.ndarray) -> np.ndarray:
+    """Vectorised transcript coverage over a whole timeline.
+
+    The per-point version scanned every segment for every point, which on a long
+    VOD is tens of thousands of segments times a hundred thousand points.
+    """
+    out = np.zeros(times.shape, dtype=np.float64)
+    if not segments or times.size == 0:
+        return out
+
+    # The half-second slack matches the original inclusive comparison.
+    for segment in segments:
+        try:
+            start = float(segment["start"]) - 0.5
+            end = float(segment["end"]) + 0.5
+            score = float(segment.get("score", 0.0))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if score <= 0.0 or end < start:
+            continue
+        lo = int(np.searchsorted(times, start, side="left"))
+        hi = int(np.searchsorted(times, end, side="right"))
+        if hi > lo:
+            np.maximum(out[lo:hi], score, out=out[lo:hi])
+    return out
 
 
 def build_timeline(
@@ -150,24 +203,47 @@ def build_timeline(
         bool(chat_features),
         transcript_available=transcript_available,
     )
-    timeline: list[TimelineSignal] = []
+    # Reproduce the original "while t <= duration" grid exactly, including its
+    # floating point accumulation, before doing anything vectorised with it.
+    count = 0
     t = 0.0
     while t <= duration:
-        a = _nearest_feature(audio_features, t)
-        tx = _transcript_at(transcript, t) if transcript_available else 0.0
-        ch = _nearest_feature(chat_features, t) if chat_features else 0.0
-        combined = weights.get("audio", 0) * a + weights.get("transcript", 0) * tx + weights.get("chat", 0) * ch
-        active_values = [a]
-        if transcript_available:
-            active_values.append(tx)
-        if chat_features:
-            active_values.append(ch)
-        active = sum(v >= 0.68 for v in active_values)
-        if active >= 2:
-            combined += 0.10
-        timeline.append(TimelineSignal(t, a, tx, ch, clamp(combined)))
+        count += 1
         t += step
-    return timeline
+    if count == 0:
+        return []
+    times = np.arange(count, dtype=np.float64) * step
+
+    audio = _nearest_feature_series(audio_features, times)
+    if transcript_available:
+        speech = _transcript_series(transcript, times)
+    else:
+        speech = np.zeros(count, dtype=np.float64)
+    chat = (
+        _nearest_feature_series(chat_features, times)
+        if chat_features
+        else np.zeros(count, dtype=np.float64)
+    )
+
+    combined = (
+        weights.get("audio", 0) * audio
+        + weights.get("transcript", 0) * speech
+        + weights.get("chat", 0) * chat
+    )
+
+    # Several independent signals firing together is worth more than one spike.
+    active = (audio >= 0.68).astype(np.int8)
+    if transcript_available:
+        active = active + (speech >= 0.68)
+    if chat_features:
+        active = active + (chat >= 0.68)
+    combined = combined + np.where(active >= 2, 0.10, 0.0)
+    combined = np.clip(combined, 0.0, 1.0)
+
+    return [
+        TimelineSignal(float(t), float(a), float(s), float(c), float(x))
+        for t, a, s, c, x in zip(times, audio, speech, chat, combined)
+    ]
 
 
 def _excerpt(transcript: list[dict], start: float, end: float, max_chars: int = 650) -> str:

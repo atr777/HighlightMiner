@@ -41,6 +41,12 @@ def _clean(text: str) -> str:
                 text = text[len(filler) + 1:].lstrip(" ,")
                 changed = True
                 break
+            # A line that is nothing but filler ("um uh like so") should end up
+            # empty so the caller falls back, rather than leaving a title of "so".
+            if lowered == filler:
+                text = ""
+                changed = True
+                break
     return text.strip()
 
 
