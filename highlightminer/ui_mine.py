@@ -66,9 +66,13 @@ from .storage import (
     list_analyses,
     load_analysis,
     analysis_crop_rect,
+    audio_feature_window,
     transcript_window,
 )
 from .shutdown import active_work_shutdown_block_reason
+from .timeline_strip import flatten_words, render_strip, window_for
+from .timeline_strip import snap_end as timeline_snap_end
+from .timeline_strip import snap_start as timeline_snap_start
 from .timestamps import ClipBounds, normalize_clip_bounds
 from .titles import suggest_title
 from .transcription_status import (
@@ -702,6 +706,68 @@ def _render_analysis_job_status(db_path: Path, job: dict) -> None:
 
 
 
+
+_NUDGE_STEPS = (-2.0, -0.5, 0.5, 2.0)
+
+
+def _adjust_time_field(key: str, delta: float, duration: float) -> None:
+    """Shift one boundary by a fixed amount, without retyping a timestamp."""
+    current = parse_editable_time(st.session_state.get(key, "")) or 0.0
+    st.session_state[key] = format_editable_time(
+        min(max(current + delta, 0.0), max(0.0, duration))
+    )
+
+
+def _snap_time_field(
+    key: str,
+    words: list[tuple[float, float, str]],
+    direction: int,
+    *,
+    to_end: bool,
+) -> None:
+    """Move one boundary onto the next or previous word edge.
+
+    Word timings already exist for captions, so a clip can start exactly where
+    someone begins speaking rather than at a guessed offset.
+    """
+    current = parse_editable_time(st.session_state.get(key, "")) or 0.0
+    target = (
+        timeline_snap_end(words, current, direction)
+        if to_end
+        else timeline_snap_start(words, current, direction)
+    )
+    if target is not None:
+        st.session_state[key] = format_editable_time(target)
+
+
+def _render_timing_controls(
+    label: str,
+    key: str,
+    words: list[tuple[float, float, str]],
+    duration: float,
+    token: str,
+    *,
+    to_end: bool,
+) -> None:
+    """Nudge and snap buttons beneath a timestamp box."""
+    columns = st.columns(6)
+    columns[0].button(
+        "⏮ word", key=f"snapback_{token}_{key}", width="stretch",
+        help="Previous word boundary",
+        on_click=_snap_time_field, args=(key, words, -1), kwargs={"to_end": to_end},
+    )
+    for index, step in enumerate(_NUDGE_STEPS, start=1):
+        columns[index].button(
+            f"{step:+g}s", key=f"nudge_{token}_{key}_{step}", width="stretch",
+            on_click=_adjust_time_field, args=(key, step, duration),
+        )
+    columns[5].button(
+        "word ⏭", key=f"snapfwd_{token}_{key}", width="stretch",
+        help="Next word boundary",
+        on_click=_snap_time_field, args=(key, words, 1), kwargs={"to_end": to_end},
+    )
+
+
 def _render_url_ingest(db_path: Path, *, disabled: bool = False) -> None:
     """Fetch a VOD and its chat from a URL, then fill in the local file fields."""
     with st.expander("Fetch from a URL", expanded=False):
@@ -1160,6 +1226,34 @@ def _render_review(db_path: Path) -> None:
     precise_start, precise_end = st.session_state[precise_bounds_key]
 
     st.subheader(f"🎞️ {candidate['id']} — {candidate['reason']}", anchor=False)
+
+    source_duration = float(analysis["duration"])
+    # The strip is drawn from stored features, so it redraws instantly on every
+    # adjustment. Re-encoding a preview just to find out where the speech
+    # starts is the slow way to answer that question.
+    pending_start = parse_editable_time(st.session_state.get(start_key, "")) or original_start
+    pending_end = parse_editable_time(st.session_state.get(end_key, "")) or original_end
+    strip_window = window_for(pending_start, pending_end, source_duration)
+    strip_words = flatten_words(
+        transcript_window(db_path, analysis_id, strip_window.view_start, strip_window.view_end)
+    )
+    try:
+        strip = render_strip(
+            Path(analysis["work_dir"]) / ".previews" / analysis_id / f"strip_{candidate['id']}.png",
+            strip_window,
+            audio_feature_window(
+                db_path, analysis_id, strip_window.view_start, strip_window.view_end
+            ),
+            strip_words,
+        )
+        st.image(str(strip), width="stretch")
+        st.caption(
+            "Loudness and words around the clip. Bright is kept, dim is trimmed. "
+            "Adjust below, then update the preview once you are happy."
+        )
+    except Exception as exc:  # noqa: BLE001 - the strip is an aid, not the feature
+        st.caption(f"Timeline strip unavailable: {exc}")
+
     # Marks arrive outside a form; keep these widgets in the same live state.
     left, right = st.columns(2)
     with left:
@@ -1168,11 +1262,17 @@ def _render_review(db_path: Path) -> None:
             key=start_key,
             help="Use MM:SS or HH:MM:SS. Fractional seconds are optional.",
         )
+        _render_timing_controls(
+            "start", start_key, strip_words, source_duration, preview_token, to_end=False
+        )
     with right:
         end_value = st.text_input(
             "Clip end",
             key=end_key,
             help="Use MM:SS or HH:MM:SS. Fractional seconds are optional.",
+        )
+        _render_timing_controls(
+            "end", end_key, strip_words, source_duration, preview_token, to_end=True
         )
     update_preview = st.button(
         "Update preview", type="primary", width="stretch",

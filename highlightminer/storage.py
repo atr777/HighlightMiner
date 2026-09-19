@@ -1048,6 +1048,35 @@ def record_export(
         conn.commit()
 
 
+def audio_feature_window(
+    db_path: str | Path | None,
+    analysis_id: str,
+    start: float,
+    end: float,
+) -> list[dict]:
+    """Audio features covering a time range, for drawing a timeline strip."""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT time, dbfs, energy, onset, score
+            FROM audio_features
+            WHERE analysis_id = ? AND time >= ? AND time <= ?
+            ORDER BY seq
+            """,
+            (analysis_id, float(start), float(end)),
+        ).fetchall()
+    return [
+        {
+            "time": float(r["time"]),
+            "dbfs": float(r["dbfs"]),
+            "energy": float(r["energy"]),
+            "onset": float(r["onset"]),
+            "score": float(r["score"]),
+        }
+        for r in rows
+    ]
+
+
 def transcript_window(
     db_path: str | Path | None,
     analysis_id: str,
