@@ -173,32 +173,52 @@ def test_malformed_segments_are_skipped():
     assert _transcript_at(segments, 2.0) == pytest.approx(0.5)
 
 
-def test_scales_linearly_not_quadratically():
-    """Six times the duration must cost roughly six times the work, not thirty six.
+def test_lookups_happen_once_per_signal_not_once_per_point(monkeypatch):
+    """Pin the algorithm rather than the clock.
 
-    Timed rather than counted, so it takes the best of several runs. A single
-    wall-clock sample is meaningless on a machine that may be transcribing at
-    the same time, which is exactly how this test first flaked.
+    The quadratic behaviour was one feature-array rebuild per timeline point.
+    Wall-clock assertions flake badly on a machine that may be transcribing at
+    the same time, so this counts the work instead: each signal is resolved in
+    exactly one vectorised pass regardless of how long the VOD is. Timing lives
+    in tools/benchmark.py, where a noisy result is read by a human.
     """
-    import time
+    from highlightminer import scoring
 
-    settings = Settings()
+    calls = {"nearest": 0, "transcript": 0}
+    real_nearest = scoring._nearest_feature_series
+    real_transcript = scoring._transcript_series
 
-    def best_of(duration, repeats=5):
-        audio = _audio(duration)
-        samples = []
-        for _ in range(repeats):
-            started = time.perf_counter()
-            build_timeline(duration, audio, [], [], settings)
-            samples.append(time.perf_counter() - started)
-        return min(samples)
+    def spy_nearest(features, times, key="score"):
+        calls["nearest"] += 1
+        return real_nearest(features, times, key)
 
-    short = best_of(3600.0)
-    long = best_of(6 * 3600.0)
+    def spy_transcript(segments, times):
+        calls["transcript"] += 1
+        return real_transcript(segments, times)
 
-    # Linear predicts about 6x, quadratic about 36x. 12x separates them with
-    # room for fixed overhead and a noisy machine.
-    assert long < short * 12, (
-        f"{short * 1000:.1f}ms for 1h vs {long * 1000:.1f}ms for 6h "
-        "suggests a return to superlinear scaling"
+    monkeypatch.setattr(scoring, "_nearest_feature_series", spy_nearest)
+    monkeypatch.setattr(scoring, "_transcript_series", spy_transcript)
+
+    duration = 3600.0
+    timeline = build_timeline(
+        duration, _audio(duration), _transcript(duration), _chat(duration), Settings()
     )
+
+    assert len(timeline) > 7000, "expected a full hour of timeline points"
+    # Audio and chat each once, transcript once. Never once per point.
+    assert calls["nearest"] == 2
+    assert calls["transcript"] == 1
+
+
+def test_per_point_helpers_are_not_used_by_the_timeline(monkeypatch):
+    """_nearest_feature is kept for outside callers but must not drive ranking."""
+    from highlightminer import scoring
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("build_timeline must not use the per-point lookup")
+
+    monkeypatch.setattr(scoring, "_nearest_feature", forbidden)
+    monkeypatch.setattr(scoring, "_transcript_at", forbidden)
+
+    duration = 600.0
+    build_timeline(duration, _audio(duration), _transcript(duration), [], Settings())
