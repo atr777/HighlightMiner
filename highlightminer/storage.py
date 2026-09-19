@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from contextlib import nullcontext
@@ -25,7 +26,21 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+DATABASE_PATH_ENV = "HIGHLIGHTMINER_DB"
+
+
 def default_db_path() -> Path:
+    """Where the database lives, unless told otherwise.
+
+    Working files often belong on a different drive from the application, so
+    the location is overridable. Without this the desktop UI could only ever
+    open the database beside the executable, while the CLI could be pointed
+    anywhere with --db, which meant an analysis run on another drive was
+    invisible in the app.
+    """
+    override = os.environ.get(DATABASE_PATH_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
     return app_root() / DATABASE_FILENAME
 
 

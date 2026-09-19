@@ -30,6 +30,7 @@ from .security import validate_local_video
 from .settings_store import load_app_settings
 from .shutdown import clear_shutdown_admission, request_shutdown_admission
 from .storage import (
+    DATABASE_PATH_ENV,
     default_db_path,
     import_legacy_analysis,
     learning_summary,
@@ -192,6 +193,9 @@ def cmd_ui(args: argparse.Namespace | None = None) -> int:
     shutdown_blocker = lambda: request_shutdown_admission(db_path)
     env = os.environ.copy()
     env["HIGHLIGHTMINER_SHUTDOWN_FILE"] = str(shutdown_file)
+    database = getattr(args, "db", None) if args is not None else None
+    if database:
+        env[DATABASE_PATH_ENV] = str(Path(database).expanduser().resolve())
     env["STREAMLIT_SERVER_HEADLESS"] = "true"
 
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
@@ -607,6 +611,11 @@ def build_parser() -> argparse.ArgumentParser:
     crop.set_defaults(func=cmd_crop)
 
     ui = sub.add_parser("ui", help="Launch the local review UI")
+    ui.add_argument(
+        "--db",
+        default=None,
+        help="Open a database elsewhere, for work kept on another drive",
+    )
     ui.add_argument("--browser", action="store_true", help="Use system browser instead of Windows desktop shell")
     ui.set_defaults(func=cmd_ui)
 
