@@ -15,8 +15,22 @@ _JSON_FILTER = "JSON files|*.json|All files|*.*"
 _PERSISTED_WIDGET_PREFIX = "_hm_persisted_widget:"
 
 
+WORK_DIR_ENV = "HIGHLIGHTMINER_WORK"
+
+
 def default_work_dir() -> str:
+    """Where scratch files go, unless told otherwise.
+
+    Mirrors HIGHLIGHTMINER_DB. Working files are large, so they usually belong
+    on a different drive from the application, and without this the folder had
+    to be retyped in the sidebar on every launch. Getting it wrong once meant a
+    13 GB download landing on the system drive.
+    """
     from .runtime import app_root
+
+    override = os.environ.get(WORK_DIR_ENV, "").strip()
+    if override:
+        return str(Path(override).expanduser())
     return str(app_root() / "highlightminer_work")
 
 
