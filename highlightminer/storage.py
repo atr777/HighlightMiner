@@ -292,6 +292,7 @@ def initialize(conn: sqlite3.Connection) -> None:
     )
     _ensure_column(conn, "candidates", "features_json TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(conn, "transcript_segments", "words_json TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(conn, "sources", "crop_rect_json TEXT")
     if source_counter_added:
         conn.execute(
             """
@@ -362,6 +363,56 @@ def initialize(conn: sqlite3.Connection) -> None:
         (str(SCHEMA_VERSION),),
     )
     conn.commit()
+
+
+
+def source_crop_rect(db_path: str | Path | None, fingerprint: str) -> dict | None:
+    """The crop region remembered for one source, if any.
+
+    Where the 9:16 window belongs depends on the channel's overlay layout, not
+    on global preference, so it is stored against the source rather than the
+    settings profile.
+    """
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT crop_rect_json FROM sources WHERE fingerprint = ?", (fingerprint,)
+        ).fetchone()
+    if not row or not row["crop_rect_json"]:
+        return None
+    rect = _unjson(row["crop_rect_json"], None)
+    return rect if isinstance(rect, dict) else None
+
+
+def save_source_crop_rect(
+    db_path: str | Path | None,
+    fingerprint: str,
+    rect: dict | None,
+) -> bool:
+    """Remember (or forget) the crop region for one source. False if unknown."""
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            "UPDATE sources SET crop_rect_json = ? WHERE fingerprint = ?",
+            (_json(rect) if rect else None, fingerprint),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def analysis_crop_rect(db_path: str | Path | None, analysis_id: str) -> dict | None:
+    """The crop region for the source behind an analysis."""
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT s.crop_rect_json
+            FROM analyses a JOIN sources s ON s.id = a.source_id
+            WHERE a.id = ?
+            """,
+            (analysis_id,),
+        ).fetchone()
+    if not row or not row["crop_rect_json"]:
+        return None
+    rect = _unjson(row["crop_rect_json"], None)
+    return rect if isinstance(rect, dict) else None
 
 
 def register_source(db_path: str | Path | None, source: dict[str, Any]) -> dict[str, Any]:

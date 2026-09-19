@@ -35,6 +35,7 @@ from .storage import (
     learning_summary,
     list_analyses,
     load_analysis,
+    analysis_crop_rect,
     record_export,
     transcript_window,
 )
@@ -327,9 +328,22 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     layout = None
     if getattr(args, "layout", "source") != "source":
-        from .render import Layout
+        from dataclasses import dataclass as _dataclass
 
-        layout = Layout(kind=args.layout)
+        from .render import layout_from_settings
+
+        @_dataclass
+        class _ExportLayoutSettings:
+            render_layout: str
+            webcam_rect: dict | None = None
+            gameplay_rect: dict | None = None
+            webcam_fraction: float = 0.3
+
+
+        layout = layout_from_settings(
+            _ExportLayoutSettings(args.layout),
+            analysis_crop_rect(args.db, args.analysis_id),
+        )
 
     captions = bool(getattr(args, "captions", False))
     if captions and layout is None:
@@ -421,6 +435,67 @@ def cmd_batch(args: argparse.Namespace) -> int:
         if job.traceback:
             print(job.traceback)
     return 0 if not result.failed else 1
+
+
+
+def cmd_crop(args: argparse.Namespace) -> int:
+    """Compare crop positions on real frames, headless."""
+    import dataclasses
+
+    from .crop_tool import CropToolError, contact_sheet, rect_for_aspect, sample_frames
+    from .media import probe_media
+    from .security import validate_local_video
+    from .settings_store import load_app_settings, save_app_settings
+
+    try:
+        source = validate_local_video(args.video)
+        duration = float(probe_media(source)["duration"])
+        out_dir = Path(args.out_dir).expanduser().resolve()
+        frames = sample_frames(source, duration, out_dir / "frames", count=args.frames)
+    except (CropToolError, Exception) as exc:  # noqa: BLE001 - reported to the user
+        print(f"Could not sample this VOD: {exc}")
+        return 2
+
+    print(f"{len(frames)} frames from {source.name} ({duration / 3600:.2f} hours)")
+
+    if args.x is not None:
+        rect = rect_for_aspect(x=args.x, y=args.y, height=args.height)
+        if args.save:
+            from .identity import describe_source
+            from .storage import save_source_crop_rect
+
+            # Remember it against this source when the database knows it, since
+            # the right window depends on the channel's overlay layout. Fall
+            # back to the profile default for a VOD never analysed here.
+            fingerprint = describe_source(source)["fingerprint"]
+            if save_source_crop_rect(args.db, fingerprint, rect.as_dict()):
+                where = "for this source"
+            else:
+                settings = load_app_settings(args.db)
+                save_app_settings(
+                    dataclasses.replace(settings, gameplay_rect=rect.as_dict()), args.db
+                )
+                where = "as the profile default (source not in the database yet)"
+            print(
+                f"Saved crop region {where}: "
+                f"x={rect.x:.3f} y={rect.y:.3f} w={rect.w:.3f} h={rect.h:.3f}"
+            )
+        candidates = [(f"x={rect.x:.3f}", rect)]
+    else:
+        # Sweep the usable range so one sheet shows every sensible position.
+        width = rect_for_aspect(x=0.0, height=args.height).w
+        candidates = []
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            x = round(fraction * (1.0 - width), 6)
+            label = {0.0: "left", 0.5: "centre", 1.0: "right"}.get(fraction, f"{fraction:.0%}")
+            candidates.append((label, rect_for_aspect(x=x, y=args.y, height=args.height)))
+
+    sheet = contact_sheet(frames, candidates, out_dir / "crop-positions.png")
+    print(f"Contact sheet: {sheet}")
+    print("Rows are crop positions, columns are sample times.")
+    if args.x is None:
+        print("Pick one, then re-run with --x <value> --save to store it.")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -515,6 +590,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cap the video height for every source.",
     )
     batch_cmd.set_defaults(func=cmd_batch)
+
+
+    crop = sub.add_parser(
+        "crop",
+        help="Compare 9:16 crop positions on real frames and save the chosen region",
+    )
+    crop.add_argument("video")
+    crop.add_argument("--frames", type=int, default=6, help="How many sample frames to pull")
+    crop.add_argument("--x", type=float, default=None, help="Left edge as a fraction; omit to sweep")
+    crop.add_argument("--y", type=float, default=0.0)
+    crop.add_argument("--height", type=float, default=1.0, help="Fraction of frame height kept")
+    crop.add_argument("--save", action="store_true", help="Store --x as the crop region")
+    crop.add_argument("--out-dir", default="crop-preview")
+    crop.add_argument("--db", default=default_db, help="SQLite database path")
+    crop.set_defaults(func=cmd_crop)
 
     ui = sub.add_parser("ui", help="Launch the local review UI")
     ui.add_argument("--browser", action="store_true", help="Use system browser instead of Windows desktop shell")

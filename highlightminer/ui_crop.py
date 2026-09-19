@@ -25,7 +25,8 @@ from .media import probe_media
 from .render import Rect
 from .security import validate_local_video
 from .settings_store import load_app_settings, save_app_settings
-from .storage import list_analyses
+from .identity import describe_source
+from .storage import list_analyses, save_source_crop_rect
 from .ui_common import _VIDEO_FILTER, path_picker
 
 _STATE_PREFIX = "crop_tool_"
@@ -191,9 +192,20 @@ def render_crop_page(db_path: Path) -> None:
 
     st.divider()
     if st.button("Save as the crop region", type="primary"):
-        save_app_settings(
-            dataclasses.replace(settings, gameplay_rect=rect.as_dict()), db_path
+        source = st.session_state.get(_SOURCE_KEY)
+        saved_for_source = False
+        if source:
+            try:
+                fingerprint = describe_source(source)["fingerprint"]
+                saved_for_source = save_source_crop_rect(db_path, fingerprint, rect.as_dict())
+            except Exception:  # noqa: BLE001 - fall back to the profile default
+                saved_for_source = False
+        if not saved_for_source:
+            save_app_settings(
+                dataclasses.replace(settings, gameplay_rect=rect.as_dict()), db_path
+            )
+        where = (
+            "for this source" if saved_for_source
+            else "as the profile default (this VOD has not been analysed yet)"
         )
-        st.success(
-            f"Saved. Exports using the crop layout will use x={rect.x:.3f}, w={rect.w:.3f}."
-        )
+        st.success(f"Saved {where}: x={rect.x:.3f}, w={rect.w:.3f}.")

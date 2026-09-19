@@ -176,3 +176,48 @@ def crop_preview(
     out.parent.mkdir(parents=True, exist_ok=True)
     cropped.save(out)
     return out
+
+
+def contact_sheet(
+    frames: list[FrameSample],
+    rects: list[tuple[str, Rect]],
+    out_path: str | Path,
+    tile_height: int = 320,
+) -> Path:
+    """One image comparing several crop positions across several frames.
+
+    Rows are candidate positions, columns are sample times, so a position that
+    works everywhere is obvious and one that only works on a lucky frame is
+    obvious too. Useful headless, where there is no browser to drag a box in.
+    """
+    if not frames or not rects:
+        raise CropToolError("Need at least one frame and one rectangle.")
+
+    tile_width = max(1, int(tile_height * SHORT_FORM_WIDTH / SHORT_FORM_HEIGHT))
+    label_height = 28
+    sheet = Image.new(
+        "RGB",
+        (tile_width * len(frames), (tile_height + label_height) * len(rects)),
+        (18, 18, 20),
+    )
+    draw = ImageDraw.Draw(sheet)
+
+    for row, (label, rect) in enumerate(rects):
+        top = row * (tile_height + label_height)
+        draw.text((6, top + 7), f"{label}  x={rect.x:.3f} w={rect.w:.3f}", fill=(255, 209, 102))
+        for column, sample in enumerate(frames):
+            source = Image.open(sample.path).convert("RGB")
+            width, height = source.size
+            box = (
+                int(rect.x * width),
+                int(rect.y * height),
+                max(int((rect.x + rect.w) * width), int(rect.x * width) + 1),
+                max(int((rect.y + rect.h) * height), int(rect.y * height) + 1),
+            )
+            tile = source.crop(box).resize((tile_width, tile_height), Image.LANCZOS)
+            sheet.paste(tile, (column * tile_width, top + label_height))
+
+    out = Path(out_path).expanduser().resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(out)
+    return out

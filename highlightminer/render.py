@@ -246,13 +246,18 @@ def escape_filter_path(path: str) -> str:
     return f"'{escaped}'"
 
 
-def layout_from_settings(settings) -> Layout | None:
-    """Build the Layout a settings profile describes, or None for source aspect."""
+def layout_from_settings(settings, crop_rect: dict | None = None) -> Layout | None:
+    """Build the Layout a settings profile describes, or None for source aspect.
+
+    ``crop_rect`` is a per-source override. The right place for the 9:16 window
+    depends on the channel's overlay layout rather than on global preference,
+    so a region remembered for this source wins over the profile default.
+    """
     kind = getattr(settings, "render_layout", "source")
     if kind == "source":
         return None
     webcam = getattr(settings, "webcam_rect", None)
-    gameplay = getattr(settings, "gameplay_rect", None)
+    gameplay = crop_rect or getattr(settings, "gameplay_rect", None)
     return Layout(
         kind=kind,
         gameplay=Rect.from_dict(gameplay) if gameplay else None,

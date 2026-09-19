@@ -65,6 +65,7 @@ from .storage import (
     learning_summary,
     list_analyses,
     load_analysis,
+    analysis_crop_rect,
     transcript_window,
 )
 from .shutdown import active_work_shutdown_block_reason
@@ -1227,7 +1228,9 @@ def _render_review(db_path: Path) -> None:
         else:
             try:
                 render_settings = load_app_settings(db_path)
-                preview_layout = layout_from_settings(render_settings)
+                preview_layout = layout_from_settings(
+                    render_settings, analysis_crop_rect(db_path, analysis_id)
+                )
                 preview_transcript = (
                     transcript_window(db_path, analysis_id, preview_start, preview_end)
                     if (preview_layout is not None and render_settings.burn_captions)
@@ -1400,7 +1403,9 @@ def _execute_export_queue(db_path: Path) -> None:
             try:
                 source_video = validate_local_video(item["source_path"])
                 export_settings = load_app_settings(db_path)
-                export_layout = layout_from_settings(export_settings)
+                export_layout = layout_from_settings(
+                    export_settings, analysis_crop_rect(db_path, item["analysis_id"])
+                )
                 export_kwargs = {}
                 if export_layout is not None:
                     export_kwargs = {
