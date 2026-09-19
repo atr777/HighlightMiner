@@ -8,6 +8,7 @@ Named router rather than resolve because the package re-exports the
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Callable
 from types import ModuleType
 
 from . import kick, twitch, youtube
@@ -55,6 +56,7 @@ def ingest(
     with_chat: bool = True,
     skip_space_check: bool = False,
     progress: IngestProgress | None = None,
+    thread_hook: Callable[[Any], Any] | None = None,
 ) -> IngestResult:
     """Fetch a VOD and, where the platform offers one, its chat replay.
 
@@ -76,6 +78,7 @@ def ingest(
         max_height=max_height,
         progress=progress,
         skip_space_check=skip_space_check,
+        thread_hook=thread_hook,
     )
 
     chat_path: Path | None = None

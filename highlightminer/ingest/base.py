@@ -8,6 +8,9 @@ with one code path; chat is where the per-platform work lives.
 from __future__ import annotations
 
 import shutil
+import threading
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -98,6 +101,89 @@ def _format_bytes(value: float) -> str:
     return f"{gb:.1f} GB" if gb >= 1 else f"{value / 1024**2:.0f} MB"
 
 
+def _format_rate(bytes_per_second: float) -> str:
+    return f"{bytes_per_second / 1024**2:.1f} MB/s"
+
+
+def _format_eta(seconds: float) -> str:
+    if seconds < 90:
+        return f"{seconds:.0f}s left"
+    minutes = seconds / 60
+    if minutes < 90:
+        return f"{minutes:.0f} min left"
+    return f"{minutes / 60:.1f} h left"
+
+
+# How often the part file is measured. Often enough to feel live, rarely
+# enough that it costs nothing next to an 18 MB/s download.
+_WATCH_INTERVAL_SEC = 1.5
+
+# Rate is averaged over this long, so a momentary stall does not read as a
+# finished download and a burst does not promise an ETA it cannot keep.
+_RATE_WINDOW_SEC = 10.0
+
+
+def _newest_part_file(out_dir: Path) -> Path | None:
+    """The part file ffmpeg is currently writing, if there is one."""
+    try:
+        parts = [p for p in out_dir.glob("*.part") if p.is_file()]
+    except OSError:
+        return None
+    if not parts:
+        return None
+    return max(parts, key=lambda p: p.stat().st_mtime)
+
+
+def _watch_part_file(
+    out_dir: Path,
+    estimated_bytes: int | None,
+    progress: IngestProgress,
+    stop: threading.Event,
+) -> None:
+    """Report download progress by watching the part file grow.
+
+    yt-dlp's progress hooks do not fire here. HLS is routed through ffmpeg as
+    an external downloader, which bypasses them, and ffmpeg itself is run with
+    output suppressed. That left a twelve gigabyte download showing nothing
+    between "estimated size" and "finished".
+
+    Measuring the file on disk needs neither, and works the same for every
+    platform because they all take the same ffmpeg path.
+    """
+    samples: deque[tuple[float, int]] = deque()
+    while not stop.is_set():
+        part = _newest_part_file(out_dir)
+        if part is not None:
+            try:
+                done = part.stat().st_size
+            except OSError:
+                done = 0
+            now = time.monotonic()
+            samples.append((now, done))
+            while len(samples) > 2 and now - samples[0][0] > _RATE_WINDOW_SEC:
+                samples.popleft()
+
+            fraction = min(0.999, done / estimated_bytes) if estimated_bytes else 0.0
+            message = f"Downloading {_format_bytes(done)}"
+            if estimated_bytes:
+                message += f" of {_format_bytes(estimated_bytes)} ({fraction * 100:.0f}%)"
+
+            elapsed = now - samples[0][0]
+            gained = done - samples[0][1]
+            if elapsed >= 2.0 and gained > 0:
+                rate = gained / elapsed
+                message += f" · {_format_rate(rate)}"
+                if estimated_bytes and done < estimated_bytes:
+                    message += f" · {_format_eta((estimated_bytes - done) / rate)}"
+
+            try:
+                progress("download", fraction, message)
+            except Exception:
+                # A failing UI callback must not take the download down.
+                pass
+        stop.wait(_WATCH_INTERVAL_SEC)
+
+
 def estimate_download_bytes(info: dict, duration: float | None = None) -> int | None:
     """Best estimate of a download's size from yt-dlp metadata.
 
@@ -182,6 +268,7 @@ def download_video(
     max_height: int = 1080,
     progress: IngestProgress | None = None,
     skip_space_check: bool = False,
+    thread_hook: Callable[[threading.Thread], Any] | None = None,
 ) -> Path:
     """Download a VOD to ``dest_dir`` and return its path.
 
@@ -189,12 +276,17 @@ def download_video(
     VODs otherwise fail with "Initialization fragment found after media
     fragments", and sending every platform down the same path keeps one code
     path rather than a Twitch special case.
+
+    ``thread_hook`` is handed the progress watcher thread before it starts, so
+    a UI framework that needs threads registered can do so. Streamlit drops
+    writes from threads it does not know about.
     """
     yt_dlp = _import_yt_dlp()
     out_dir = Path(dest_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     downloaded: list[str] = []
+    estimated_bytes: int | None = None
 
     def hook(status: dict) -> None:
         if status.get("status") == "finished" and status.get("filename"):
@@ -233,6 +325,7 @@ def download_video(
             raise IngestError(f"Could not read VOD metadata: {exc}") from exc
         if isinstance(preflight, dict):
             estimated = estimate_download_bytes(preflight)
+            estimated_bytes = estimated
             if progress and estimated:
                 progress(
                     "preflight", 0.0,
@@ -240,11 +333,28 @@ def download_video(
                 )
             check_disk_space(out_dir, estimated)
 
+    stop_watching = threading.Event()
+    watcher: threading.Thread | None = None
+    if progress is not None:
+        watcher = threading.Thread(
+            target=_watch_part_file,
+            args=(out_dir, estimated_bytes, progress, stop_watching),
+            name="highlightminer-download-progress",
+            daemon=True,
+        )
+        if thread_hook is not None:
+            thread_hook(watcher)
+        watcher.start()
+
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
             data = ydl.extract_info(url, download=True)
     except Exception as exc:
         raise IngestError(f"Video download failed: {exc}") from exc
+    finally:
+        stop_watching.set()
+        if watcher is not None:
+            watcher.join(timeout=_WATCH_INTERVAL_SEC * 2)
 
     # yt-dlp reports the final path through the hook; fall back to its own
     # filename prediction when ffmpeg downloading bypassed the hook.

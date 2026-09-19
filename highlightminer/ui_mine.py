@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
+from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 from .analysis_jobs import (
     AnalysisJobStateError,
@@ -954,18 +955,32 @@ def _render_url_ingest(db_path: Path, *, disabled: bool = False) -> None:
         target = st.session_state.get("work_dir_input") or default_work_dir()
         if st.button("Download", key="ingest_url_button", disabled=disabled or not url):
             status = st.empty()
+            meter = st.empty()
+
+            def report(stage: str, fraction: float, message: str) -> None:
+                status.write(f"{message}…")
+                # A twelve gigabyte VOD is a long time to look at a spinner, so
+                # the download stage gets a real bar.
+                if stage == "download" and fraction > 0:
+                    meter.progress(min(1.0, max(0.0, fraction)))
+
             try:
                 with st.spinner("Fetching VOD…"):
                     result = ingest(
                         url,
                         Path(target) / "vods",
-                        progress=lambda stage, frac, msg: status.write(f"{msg}…"),
+                        progress=report,
+                        # The watcher runs on its own thread, and Streamlit
+                        # silently drops writes from threads it does not know.
+                        thread_hook=add_script_run_ctx,
                     )
             except IngestError as exc:
                 status.empty()
+                meter.empty()
                 st.error(f"Could not fetch that URL: {exc}")
             else:
                 status.empty()
+                meter.empty()
                 # Fill the normal local-file fields, so everything downstream is
                 # identical to having picked the files by hand.
                 st.session_state["video_path_input"] = str(result.video_path)
