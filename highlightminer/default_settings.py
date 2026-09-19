@@ -39,6 +39,7 @@ def product_default_settings() -> Settings:
         render_layout="source",
         burn_captions=False,
         caption_font_size=96,
+        export_quality=23,
         caption_uppercase=False,
         webcam_fraction=0.3,
         webcam_rect=None,

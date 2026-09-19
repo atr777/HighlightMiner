@@ -1417,6 +1417,7 @@ def _execute_export_queue(db_path: Path) -> None:
                             if export_settings.burn_captions else None
                         ),
                         "caption_style": style_from_settings(export_settings),
+                        "quality": export_settings.export_quality,
                     }
                 output = export_clip(
                     source_video,

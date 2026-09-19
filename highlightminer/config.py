@@ -45,6 +45,7 @@ class Settings:
     render_layout: str = "source"
     burn_captions: bool = False
     caption_font_size: int = 96
+    export_quality: int = 23
     caption_uppercase: bool = False
     webcam_fraction: float = 0.3
     webcam_rect: dict[str, float] | None = None
@@ -102,6 +103,9 @@ class Settings:
         self.render_layout = str(self.render_layout).lower().strip()
         if self.render_layout not in _ALLOWED_RENDER_LAYOUTS:
             raise ValueError(f"render_layout must be one of {sorted(_ALLOWED_RENDER_LAYOUTS)}")
+        self.export_quality = int(self.export_quality)
+        if not 0 <= self.export_quality <= 51:
+            raise ValueError("export_quality must be between 0 (largest) and 51 (smallest).")
         self.caption_font_size = int(self.caption_font_size)
         if not 16 <= self.caption_font_size <= 400:
             raise ValueError("caption_font_size must be between 16 and 400.")

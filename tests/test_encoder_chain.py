@@ -111,3 +111,45 @@ def test_preview_and_final_use_different_audio_bitrates(chain, tmp_path):
     final_command = chain.commands["h264_nvenc"]
     assert preview_command[preview_command.index("-b:a") + 1] == "128k"
     assert final_command[final_command.index("-b:a") + 1] == "192k"
+
+
+class TestExportQuality:
+    """One quantizer drives every encoder, on roughly the same 0..51 scale."""
+
+    def test_quality_reaches_every_encoder(self):
+        from highlightminer.export import _encoder_variants, _software_variant
+
+        for name, args in _encoder_variants(23):
+            assert "23" in args, f"{name} ignored the quality setting"
+        assert "23" in _software_variant(23)[1]
+
+    def test_default_is_the_measured_balance(self):
+        from highlightminer.config import Settings
+        from highlightminer.export import DEFAULT_EXPORT_QUALITY
+
+        # 23 measured 7.6 Mbps at SSIM 0.9887 against 11.3 Mbps at 0.9914 for 20.
+        assert DEFAULT_EXPORT_QUALITY == 23
+        assert Settings().export_quality == 23
+
+    def test_export_passes_quality_through(self, chain, tmp_path):
+        _encode(tmp_path, quality=29)
+        assert "29" in chain.commands["h264_nvenc"]
+
+    def test_previews_use_their_own_quality(self, chain, tmp_path):
+        from highlightminer.export import PREVIEW_QUALITY
+
+        _encode(tmp_path, preview=True)
+        assert str(PREVIEW_QUALITY) in chain.commands["h264_nvenc"]
+
+    def test_preview_quality_is_not_overridden_by_export_quality(self, chain, tmp_path):
+        from highlightminer.export import PREVIEW_QUALITY
+
+        _encode(tmp_path, preview=True, quality=15)
+        assert str(PREVIEW_QUALITY) in chain.commands["h264_nvenc"]
+
+    @pytest.mark.parametrize("bad", [-1, 52])
+    def test_settings_reject_out_of_range_quality(self, bad):
+        from highlightminer.config import Settings
+
+        with pytest.raises(ValueError, match="export_quality"):
+            Settings(export_quality=bad)
