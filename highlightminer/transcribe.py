@@ -16,6 +16,7 @@ from .config import Settings
 from .diagnostics import log_detailed, log_event, safe_model_name
 from .model_access import ModelAccessPreferences, PreparedModelReference, prepare_model_reference
 from .runtime import configure_windows_cuda_dll_search
+from .transcript_checkpoint import open_checkpoint
 from .transcription_status import TRANSCRIPTION_AVAILABLE
 from .util import clamp
 
@@ -259,37 +260,6 @@ def _iter_audio_chunks(wav_path: str | Path, chunk_sec: float, overlap_sec: floa
             position += step
 
 
-def _iter_segments(model, audio_path: str | Path, kwargs: dict, chunk_sec: float):
-    """Yield (offset, segment) pairs, transcribing in bounded chunks when asked.
-
-    Whisper's VAD filter builds the entire signal as one array of 576-sample
-    frames. For a 13.5 hour VOD that is 1.5 million frames, 3.3 GB, and it fails
-    outright on a 16 GB machine. Chunking bounds that regardless of VOD length.
-
-    Chunks overlap, and a segment is kept only by the chunk whose owned region
-    it begins in. That way speech crossing a boundary is transcribed in full by
-    the earlier chunk and not repeated by the later one.
-    """
-    if chunk_sec <= 0:
-        segments, info = model.transcribe(str(audio_path), **kwargs)
-        yield from ((0.0, seg) for seg in segments)
-        return info
-
-    info = None
-    for offset, samples, owned_end in _iter_audio_chunks(audio_path, chunk_sec):
-        segments, chunk_info = model.transcribe(samples, **kwargs)
-        if info is None:
-            info = chunk_info
-        for seg in segments:
-            start = _safe_float(getattr(seg, "start", None))
-            # Segments starting in the overlap tail belong to the next chunk,
-            # which will transcribe them with more of their audio available.
-            if start is not None and (offset + start) >= owned_end:
-                continue
-            yield offset, seg
-    return info
-
-
 def transcribe_audio(
     audio_path: str | Path,
     settings: Settings,
@@ -298,6 +268,7 @@ def transcribe_audio(
     *,
     audio_duration: float | None = None,
     progress: TranscriptionProgress | None = None,
+    work_dir: str | Path | None = None,
 ) -> tuple[list[dict], dict]:
     configure_windows_cuda_dll_search()
     from faster_whisper import WhisperModel
@@ -402,12 +373,12 @@ def transcribe_audio(
     if chunk_sec > 0:
         log_detailed("transcription.chunked", chunk_seconds=chunk_sec)
 
+    checkpoint = open_checkpoint(work_dir, settings, audio_path, chunk_sec, CHUNK_OVERLAP_SEC)
+    recovered = checkpoint.load() if checkpoint else 0
+    if recovered:
+        log_event("transcription.resumed", chunks_recovered=recovered)
+
     info = None
-
-    def _segment_source():
-        nonlocal info
-        info = yield from _iter_segments(model, audio_path, kwargs, chunk_sec)
-
     rows: list[dict] = []
     duration = max(0.0, float(audio_duration or 0.0))
     last_report_at = started_at
@@ -427,41 +398,83 @@ def transcribe_audio(
         audio_text = ""
         if duration > 0:
             audio_text = f" · {_format_elapsed(furthest_audio_second)} / {_format_elapsed(duration)} audio"
+        resumed = f" · resumed {recovered} chunks" if recovered else ""
         report(
             f"Transcribing — {_runtime_label(device, compute_type, prepared.display_name, cpu_threads)}"
-            f"{audio_text} · elapsed {_format_elapsed(now - started_at)}",
+            f"{audio_text}{resumed} · elapsed {_format_elapsed(now - started_at)}",
             fraction,
         )
         last_report_at = now
         last_fraction = fraction
 
-    report_transcription(force=True)
-    for chunk_offset, seg in _segment_source():
+    def build_row(seg: object, offset: float) -> dict | None:
+        """Normalise one segment to absolute time, or None if unusable."""
         start = _safe_float(getattr(seg, "start", None))
         end = _safe_float(getattr(seg, "end", None))
-        if start is not None:
-            start += chunk_offset
-        if end is not None:
-            end += chunk_offset
-        if end is not None:
-            furthest_audio_second = max(furthest_audio_second, max(0.0, end))
-            report_transcription()
         raw_text = getattr(seg, "text", "")
         text = "" if raw_text is None else str(raw_text).strip()
         if start is None or end is None or not text:
-            continue
-
-        start = max(0.0, start)
-        end = max(start, end)
-        score, reasons = score_text(text, settings.reaction_phrases)
-        rows.append({
+            return None
+        start = max(0.0, start + offset)
+        end = max(start, end + offset)
+        return {
             "start": round(start, 3),
             "end": round(end, 3),
             "text": text,
-            "score": round(score, 4),
-            "reasons": reasons,
-            "words": _segment_words(seg, start, end, chunk_offset),
-        })
+            "words": _segment_words(seg, start, end, offset),
+        }
+
+    report_transcription(force=True)
+
+    if chunk_sec <= 0:
+        segments, info = model.transcribe(str(audio_path), **kwargs)
+        for seg in segments:
+            end = _safe_float(getattr(seg, "end", None))
+            if end is not None:
+                furthest_audio_second = max(furthest_audio_second, max(0.0, end))
+                report_transcription()
+            row = build_row(seg, 0.0)
+            if row:
+                rows.append(row)
+    else:
+        for index, (offset, samples, owned_end) in enumerate(
+            _iter_audio_chunks(audio_path, chunk_sec)
+        ):
+            cached = checkpoint.rows_for(index) if checkpoint else None
+            if cached is not None:
+                rows.extend(cached)
+                furthest_audio_second = max(furthest_audio_second, owned_end)
+                report_transcription()
+                continue
+
+            segments, chunk_info = model.transcribe(samples, **kwargs)
+            if info is None:
+                info = chunk_info
+
+            chunk_rows: list[dict] = []
+            for seg in segments:
+                start = _safe_float(getattr(seg, "start", None))
+                # Segments starting in the overlap tail belong to the next
+                # chunk, which sees more of their audio.
+                if start is not None and (offset + start) >= owned_end:
+                    continue
+                row = build_row(seg, offset)
+                if row:
+                    chunk_rows.append(row)
+
+            if checkpoint:
+                checkpoint.append(index, chunk_rows)
+            rows.extend(chunk_rows)
+            furthest_audio_second = max(furthest_audio_second, owned_end)
+            report_transcription()
+
+    rows.sort(key=lambda r: (r["start"], r["end"]))
+    # Reaction scoring is cheap and depends on the phrase list, so it happens
+    # here rather than being baked into the checkpoint.
+    for row in rows:
+        score, reasons = score_text(row["text"], settings.reaction_phrases)
+        row["score"] = round(score, 4)
+        row["reasons"] = reasons
 
     elapsed_seconds = max(0.0, time.perf_counter() - started_at)
     if duration > 0:
@@ -484,4 +497,6 @@ def transcribe_audio(
     }
     if cpu_threads is not None:
         metadata["cpu_threads"] = cpu_threads
+    if checkpoint:
+        metadata["resumed_chunks"] = recovered
     return rows, metadata

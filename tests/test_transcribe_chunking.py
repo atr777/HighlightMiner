@@ -35,19 +35,6 @@ def _segment(text, start, end, words=None):
     return SimpleNamespace(text=text, start=start, end=end, words=words or [])
 
 
-class FakeModel:
-    """Returns one segment per call, timed relative to the chunk it was given."""
-
-    def __init__(self):
-        self.calls = []
-
-    def transcribe(self, audio, **kwargs):
-        self.calls.append(audio)
-        seconds = (len(audio) / 16000) if isinstance(audio, np.ndarray) else None
-        seg = _segment("hello", 1.0, 2.0, [_word("hello", 1.0, 2.0)])
-        return [seg], SimpleNamespace(language="en", duration=seconds)
-
-
 class TestIterAudioChunks:
     def test_splits_into_bounded_chunks(self, tmp_path):
         path = _write_wav(tmp_path / "a.wav", 10.0)
@@ -108,49 +95,9 @@ class TestIterAudioChunks:
             list(t._iter_audio_chunks(path, chunk_sec=1.0))
 
 
-class TestIterSegments:
-    def test_chunk_disabled_uses_a_single_pass(self, tmp_path):
-        path = _write_wav(tmp_path / "a.wav", 10.0)
-        model = FakeModel()
-        pairs = list(t._iter_segments(model, path, {}, chunk_sec=0.0))
-        assert len(model.calls) == 1
-        # the whole-file path passes a path, not samples
-        assert isinstance(model.calls[0], str)
-        assert [o for o, _ in pairs] == [0.0]
-
-    def test_each_chunk_carries_its_offset(self, tmp_path):
-        path = _write_wav(tmp_path / "a.wav", 9.0)
-        model = FakeModel()
-        pairs = list(t._iter_segments(model, path, {}, chunk_sec=3.0))
-        assert [o for o, _ in pairs] == pytest.approx([0.0, 3.0, 6.0])
-        assert len(model.calls) == 3
-        assert all(isinstance(c, np.ndarray) for c in model.calls)
-
-    def test_segments_starting_in_the_overlap_are_left_to_the_next_chunk(self, tmp_path):
-        """Otherwise the same speech is transcribed twice, once per chunk."""
-        path = _write_wav(tmp_path / "a.wav", 9.0)
-
-        class TailModel:
-            def transcribe(self, audio, **kwargs):
-                # A segment 0.5s in and another well into the overlap tail.
-                return [
-                    _segment("kept", 0.5, 1.0),
-                    _segment("deferred", 3.5, 3.9),
-                ], SimpleNamespace(language="en")
-
-        pairs = list(t._iter_segments(TailModel(), path, {}, chunk_sec=3.0))
-        assert [seg.text for _, seg in pairs] == ["kept", "kept", "kept"]
-
-    def test_returns_info_from_the_first_chunk(self, tmp_path):
-        path = _write_wav(tmp_path / "a.wav", 9.0)
-        model = FakeModel()
-        gen = t._iter_segments(model, path, {}, chunk_sec=3.0)
-        try:
-            while True:
-                next(gen)
-        except StopIteration as stop:
-            info = stop.value
-        assert info.language == "en"
+# Chunk ownership, offsets and the single-pass path are covered in
+# test_transcribe_resume.py, which drives transcribe_audio itself so the
+# production path and the test cannot drift apart.
 
 
 class TestSegmentWordOffsets:

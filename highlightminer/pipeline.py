@@ -127,6 +127,26 @@ def _noop(_: str, __: float) -> None:
     pass
 
 
+# A 16 kHz mono 16-bit WAV is 32000 bytes per second. Accept a small shortfall
+# because ffmpeg's output can differ from the container duration by a frame or
+# two, but reject anything obviously truncated by an interrupted run.
+_ANALYSIS_AUDIO_BYTES_PER_SECOND = 32000
+_ANALYSIS_AUDIO_TOLERANCE = 0.99
+
+
+def _usable_analysis_audio(wav: Path, duration: float) -> bool:
+    """Whether a previously extracted analysis WAV can be trusted."""
+    if duration <= 0:
+        return False
+    try:
+        size = wav.stat().st_size
+    except OSError:
+        return False
+    expected = duration * _ANALYSIS_AUDIO_BYTES_PER_SECOND
+    return size >= expected * _ANALYSIS_AUDIO_TOLERANCE
+
+
+
 def _stage_signatures(
     settings: Settings,
     chat_path: str | Path | None,
@@ -298,6 +318,7 @@ def analyze_vod(
     pipeline_started_at = time.perf_counter()
     timings: dict[str, float] = {}
     wav: Path | None = None
+    analysis_completed = False
     detailed_started = False
     job_heartbeat: _AnalysisJobHeartbeat | None = None
 
@@ -557,19 +578,21 @@ def analyze_vod(
         need_wav = need_audio or need_transcript
 
         if need_wav:
-            temp_handle = tempfile.NamedTemporaryFile(
-                prefix="highlightminer-",
-                suffix=".wav",
-                dir=work,
-                delete=False,
-            )
-            wav = Path(temp_handle.name)
-            temp_handle.close()
-            report("audio_extract", "Extracting 16 kHz analysis audio", 0.10)
-            stage_started_at = time.perf_counter()
-            with diagnostic_stage("audio_extract"):
-                extract_analysis_audio(video, wav)
-            timings["audio_extract_seconds"] = _elapsed_since(stage_started_at)
+            # A fixed name rather than a random one, so an interrupted run can
+            # reuse the extraction instead of spending another pass on it.
+            # Extracting 13.5 hours takes about twelve minutes.
+            wav = work / "analysis-audio.wav"
+            reused_audio = _usable_analysis_audio(wav, duration)
+            if reused_audio:
+                report("audio_extract", "Reusing extracted analysis audio", 0.16)
+                log_event("audio.extract_reused", seconds=round(duration, 1))
+            else:
+                report("audio_extract", "Extracting 16 kHz analysis audio", 0.10)
+                stage_started_at = time.perf_counter()
+                with diagnostic_stage("audio_extract"):
+                    wav.unlink(missing_ok=True)
+                    extract_analysis_audio(video, wav)
+                timings["audio_extract_seconds"] = _elapsed_since(stage_started_at)
         elif transcription_skipped:
             report("audio_extract", "Speech recognition disabled; using available signals", 0.16)
         else:
@@ -603,6 +626,7 @@ def analyze_vod(
                     prepared_model=prepared_model,
                     audio_duration=duration,
                     progress=transcription_progress,
+                    work_dir=work,
                 )
             timings["transcription_seconds"] = _elapsed_since(stage_started_at)
         elif transcription_skipped:
@@ -752,6 +776,7 @@ def analyze_vod(
             candidate_count=len(candidates),
             reused_stages=sorted(cache_from),
         )
+        analysis_completed = True
         return analysis_id
     except ModelDecisionRequired as exc:
         if job_id is not None and job_started:
@@ -805,10 +830,18 @@ def analyze_vod(
     finally:
         if job_heartbeat is not None:
             job_heartbeat.stop()
-        if wav is not None:
-            try:
-                wav.unlink(missing_ok=True)
-            except OSError:
-                pass
+        # Scratch files are only cleared once the analysis is safely stored.
+        # A failed or interrupted run keeps its extracted audio and transcript
+        # checkpoint so a retry resumes instead of starting from nothing.
+        if analysis_completed:
+            for scratch in (wav, work / "transcript-progress.jsonl"):
+                if scratch is None:
+                    continue
+                try:
+                    scratch.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        elif wav is not None and wav.exists():
+            log_event("analysis.scratch_retained", path=wav.name)
         if detailed_started:
             stop_detailed_run()
