@@ -15,6 +15,23 @@ button:disabled { opacity: .5; cursor: default; }
 <p id="status" role="status">Seek to a boundary, then mark it. Use Update preview to apply the trim.</p>
 <script>
 const player = document.getElementById('player');
+// Previews are loud: the source is a stream mic at full level, cropped to a
+// phone-sized clip you are judging, not listening to. Start quiet, and
+// remember any change so it is not re-set on every candidate.
+const VOLUME_KEY = 'highlightminer-preview-volume';
+const DEFAULT_VOLUME = 0.35;
+function storedVolume() {
+  try {
+    const saved = parseFloat(window.localStorage.getItem(VOLUME_KEY));
+    if (Number.isFinite(saved) && saved >= 0 && saved <= 1) return saved;
+  } catch (err) { /* private mode or blocked storage */ }
+  return DEFAULT_VOLUME;
+}
+function applyVolume() { player.volume = storedVolume(); }
+applyVolume();
+player.addEventListener('volumechange', () => {
+  try { window.localStorage.setItem(VOLUME_KEY, String(player.volume)); } catch (err) { /* ignore */ }
+});
 const status = document.getElementById('status');
 const buttons = ['in', 'out'].map(id => document.getElementById(id));
 let token = null, disabled = true, sequence = 0, pending = null, duration = 0;
@@ -28,7 +45,7 @@ window.addEventListener('message', event => {
   disabled = !!args.disabled; duration = args.duration;
   if (args.ack === pending) pending = null;
   if (args.token !== token) {
-    pending = null; player.pause(); token = args.token; player.src = args.src; player.load();
+    pending = null; player.pause(); token = args.token; player.src = args.src; player.load(); applyVolume();
     status.textContent = 'Seek to a boundary, then mark it. Use Update preview to apply the trim.';
   }
   const theme = event.data.theme;
