@@ -66,6 +66,7 @@ from .storage import (
     save_analysis,
 )
 from .transcribe import score_text, transcribe_audio
+from .word_refine import merge_refined, refine_windows, windows_for_candidates
 from .transcription_status import (
     SKIP_REASON_MODEL_DOWNLOADS_DISABLED,
     SKIP_REASON_USER_REQUESTED,
@@ -174,6 +175,11 @@ def _stage_signatures(
             # A transcript without word timings cannot produce captions, so it
             # must not satisfy a run that needs them.
             "word_timestamps": settings.word_timestamps,
+            # Different engines produce different words, so a cached transcript
+            # from one must not satisfy a run configured for the other.
+            "backend": settings.transcription_backend,
+            "whispercpp_model": settings.whispercpp_model,
+            "refine_word_timings": settings.refine_word_timings,
         },
     )
     # The chat signature covers the scoring parameters as well as the file,
@@ -195,6 +201,62 @@ def _stage_signatures(
             {"chat": None, "scoring": chat_scoring},
         )
     return {"audio": audio, "transcript": transcript, "chat": chat}
+
+
+def _needs_word_refinement(transcript_meta: dict | None, settings: Settings) -> bool:
+    """Whether the sweep left word timings for a later pass to fill in."""
+    if not settings.word_timestamps or not settings.refine_word_timings:
+        return False
+    return not bool((transcript_meta or {}).get("word_timestamps", True))
+
+
+def _sweep_transcript(
+    wav,
+    settings: Settings,
+    *,
+    model_access,
+    prepared_model,
+    duration: float | None,
+    progress,
+    work_dir,
+) -> tuple[list[dict], dict]:
+    """Transcribe the whole source with whichever backend is configured.
+
+    ``auto`` prefers whisper.cpp when a build and model are on disk and falls
+    back quietly, because that is what choosing "auto" asks for. An explicit
+    ``whispercpp`` raises instead: silently taking several times longer than
+    asked for is worse than saying what is missing.
+    """
+    from . import whispercpp
+
+    backend = settings.transcription_backend
+    if backend in {"auto", "whispercpp"}:
+        available = whispercpp.is_available(settings)
+        if not available and backend == "whispercpp":
+            # resolve_tools raises with the specific thing that is missing.
+            whispercpp.resolve_tools(settings)
+        if available:
+            progress("Transcribing with whisper.cpp", 0.0)
+            try:
+                return whispercpp.transcribe(
+                    wav,
+                    settings,
+                    threads=int(settings.cpu_threads) or None,
+                )
+            except whispercpp.WhisperCppUnavailable:
+                if backend == "whispercpp":
+                    raise
+                log_event("transcription.backend_fallback", level=logging.WARNING, to="faster-whisper")
+
+    return transcribe_audio(
+        wav,
+        settings,
+        model_access=model_access,
+        prepared_model=prepared_model,
+        audio_duration=duration,
+        progress=progress,
+        work_dir=work_dir,
+    )
 
 
 def _rescore_transcript(rows: list[dict], settings: Settings) -> list[dict]:
@@ -619,12 +681,12 @@ def analyze_vod(
                 report("transcription", message, _map_transcription_progress(fraction))
 
             with diagnostic_stage("transcription"):
-                transcript, transcript_meta = transcribe_audio(
+                transcript, transcript_meta = _sweep_transcript(
                     wav,
                     settings,
                     model_access=model_access,
                     prepared_model=prepared_model,
-                    audio_duration=duration,
+                    duration=duration,
                     progress=transcription_progress,
                     work_dir=work,
                 )
@@ -696,6 +758,34 @@ def analyze_vod(
         for candidate in candidates:
             candidate["content_label"] = normalized_content_label
         log_event("candidates.generated", count=len(candidates))
+
+        # The sweep backend produces no word timings. Captions and the timeline
+        # strip need them, but only inside candidate windows, which is minutes
+        # of audio rather than hours.
+        if _needs_word_refinement(transcript_meta, settings) and candidates and wav is not None:
+            windows = windows_for_candidates(candidates)
+            covered = sum(w.span for w in windows)
+            report(
+                "transcription",
+                f"Refining word timings over {len(windows)} windows ({covered / 60:.1f} min)",
+                0.90,
+            )
+            stage_started_at = time.perf_counter()
+            with diagnostic_stage("word_refinement"):
+                refined = refine_windows(
+                    wav,
+                    windows,
+                    settings,
+                    model_access=model_access,
+                    prepared_model=prepared_model,
+                    progress=lambda message, fraction: report("transcription", message, 0.90),
+                )
+                transcript = merge_refined(transcript, refined, windows)
+            timings["word_refinement_seconds"] = _elapsed_since(stage_started_at)
+            transcript_meta = dict(transcript_meta or {})
+            transcript_meta["word_timestamps"] = bool(refined)
+            transcript_meta["word_timings_source"] = "faster-whisper-refinement"
+            transcript_meta["word_timing_windows"] = len(windows)
 
         timings["pipeline_elapsed_seconds"] = _elapsed_since(pipeline_started_at)
         cache_info = {

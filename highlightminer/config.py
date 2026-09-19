@@ -15,6 +15,9 @@ _STANDARD_WHISPER_MODELS = {
     "distil-small.en", "distil-medium.en", "distil-large-v2", "distil-large-v3",
 }
 _ALLOWED_DEVICES = {"auto", "cpu", "cuda"}
+# "auto" prefers whisper.cpp when a usable build and model are present,
+# because on hardware CTranslate2 cannot use it is several times faster.
+_ALLOWED_TRANSCRIPTION_BACKENDS = {"auto", "faster-whisper", "whispercpp"}
 _ALLOWED_RENDER_LAYOUTS = {"source", "letterbox", "crop", "webcam"}
 _ALLOWED_COMPUTE_TYPES = {
     "auto", "int8", "int8_float16", "int8_float32", "int8_bfloat16",
@@ -32,6 +35,12 @@ class Settings:
     beam_size: int = 5
     vad_filter: bool = True
     word_timestamps: bool = True
+    transcription_backend: str = "faster-whisper"
+    whispercpp_binary: str = ""
+    whispercpp_model: str = ""
+    # The sweep backend produces no word timings, so captions and the
+    # timeline strip depend on re-transcribing the candidate windows.
+    refine_word_timings: bool = True
     transcribe_chunk_sec: float = 1800.0
     audio_window_sec: float = 1.0
     audio_hop_sec: float = 0.5
@@ -91,6 +100,14 @@ class Settings:
         self.device = str(self.device).lower().strip()
         if self.device not in _ALLOWED_DEVICES:
             raise ValueError(f"device must be one of {sorted(_ALLOWED_DEVICES)}")
+        self.transcription_backend = str(self.transcription_backend).lower().strip()
+        if self.transcription_backend not in _ALLOWED_TRANSCRIPTION_BACKENDS:
+            raise ValueError(
+                f"transcription_backend must be one of {sorted(_ALLOWED_TRANSCRIPTION_BACKENDS)}"
+            )
+        self.whispercpp_binary = str(self.whispercpp_binary or "").strip()
+        self.whispercpp_model = str(self.whispercpp_model or "").strip()
+        self.refine_word_timings = bool(self.refine_word_timings)
         self.compute_type = str(self.compute_type).lower().strip()
         if self.compute_type not in _ALLOWED_COMPUTE_TYPES:
             raise ValueError(f"compute_type must be one of {sorted(_ALLOWED_COMPUTE_TYPES)}")

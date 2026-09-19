@@ -259,3 +259,56 @@ render_mine_page(Path(r"{db.as_posix()}"))
         tmp_path,
     )
     assert not app.exception
+
+
+def test_settings_page_exposes_the_transcription_engine(tmp_path):
+    db = (tmp_path / "highlightminer.db").as_posix()
+    app = _run(
+        f'''
+from pathlib import Path
+from highlightminer.ui_settings import render_settings_page
+render_settings_page(Path(r"{db}"))
+''',
+        tmp_path,
+    )
+    assert not app.exception, app.exception
+    assert "Engine" in {t.label for t in app.selectbox}
+
+
+def test_the_engine_page_reports_the_vulkan_build_state(tmp_path):
+    """Either it found the build or it says what is missing; never silence."""
+    from highlightminer.config import Settings
+    from highlightminer.settings_store import save_app_settings
+
+    db = tmp_path / "highlightminer.db"
+    save_app_settings(Settings(transcription_backend="whispercpp"), db)
+    app = _run(
+        f'''
+from pathlib import Path
+from highlightminer.ui_settings import render_settings_page
+render_settings_page(Path(r"{db.as_posix()}"))
+''',
+        tmp_path,
+    )
+    assert not app.exception, app.exception
+    assert app.success or app.warning
+
+
+def test_turning_refinement_off_on_the_gpu_engine_warns(tmp_path):
+    from highlightminer.config import Settings
+    from highlightminer.settings_store import save_app_settings
+
+    db = tmp_path / "highlightminer.db"
+    save_app_settings(
+        Settings(transcription_backend="whispercpp", refine_word_timings=False), db
+    )
+    app = _run(
+        f'''
+from pathlib import Path
+from highlightminer.ui_settings import render_settings_page
+render_settings_page(Path(r"{db.as_posix()}"))
+''',
+        tmp_path,
+    )
+    assert not app.exception, app.exception
+    assert any("word timings" in w.value for w in app.warning)

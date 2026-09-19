@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from types import SimpleNamespace
+
 import streamlit as st
 
 from .config import Settings, _STANDARD_WHISPER_MODELS
@@ -29,6 +31,8 @@ _EDITOR_KEYS = {
     "language": "cfg_language",
     "beam": "cfg_beam",
     "vad": "cfg_vad",
+    "backend": "cfg_backend",
+    "refine_words": "cfg_refine_words",
     "audio_window": "cfg_audio_window",
     "audio_hop": "cfg_audio_hop",
     "pre_roll": "cfg_pre_roll",
@@ -99,6 +103,8 @@ def _seed_editor(settings: Settings, *, force: bool = False) -> None:
         "language": settings.language or "",
         "beam": int(settings.beam_size),
         "vad": bool(settings.vad_filter),
+        "backend": settings.transcription_backend,
+        "refine_words": bool(settings.refine_word_timings),
         "audio_window": float(settings.audio_window_sec),
         "audio_hop": float(settings.audio_hop_sec),
         "pre_roll": float(settings.pre_roll_sec),
@@ -244,6 +250,8 @@ def _build_settings() -> Settings:
         language=str(st.session_state[_EDITOR_KEYS["language"]]).strip() or None,
         beam_size=int(st.session_state[_EDITOR_KEYS["beam"]]),
         vad_filter=bool(st.session_state[_EDITOR_KEYS["vad"]]),
+        transcription_backend=str(st.session_state[_EDITOR_KEYS["backend"]]),
+        refine_word_timings=bool(st.session_state[_EDITOR_KEYS["refine_words"]]),
         audio_window_sec=float(st.session_state[_EDITOR_KEYS["audio_window"]]),
         audio_hop_sec=float(st.session_state[_EDITOR_KEYS["audio_hop"]]),
         pre_roll_sec=float(st.session_state[_EDITOR_KEYS["pre_roll"]]),
@@ -273,6 +281,32 @@ def _build_settings() -> Settings:
         chat_min_burst_messages=float(st.session_state[_EDITOR_KEYS["chat_burst"]]),
         cpu_threads=int(st.session_state[_EDITOR_KEYS["cpu_threads"]]),
     )
+
+
+def _render_whispercpp_status() -> None:
+    """Say plainly whether the Vulkan build is actually there."""
+    from . import whispercpp
+
+    # Explicit binary and model paths are a settings-file escape hatch, not a
+    # field on this page, so the status check reports on plain discovery.
+    settings_like = SimpleNamespace(
+        whispercpp_binary="",
+        whispercpp_model="",
+        whisper_model=str(st.session_state.get(_EDITOR_KEYS["model"], "large-v3")),
+    )
+    try:
+        tools = whispercpp.resolve_tools(settings_like)
+    except whispercpp.WhisperCppUnavailable as exc:
+        st.warning(str(exc))
+        return
+    st.success(f"Found {tools.binary.name} with {tools.model.name}")
+    requested = settings_like.whisper_model
+    used = tools.model.stem.replace("ggml-", "")
+    if requested and requested not in {used, "turbo", _ADVANCED_WHISPER_MODEL}:
+        st.info(
+            f"No ggml build of {requested} is on disk, so whisper.cpp would run {used}. "
+            "Different weights mean different words."
+        )
 
 
 def render_settings_page(db_path: Path) -> None:
@@ -321,6 +355,50 @@ def render_settings_page(db_path: Path) -> None:
             st.selectbox("Compute type", ["auto", "float16", "float32", "int8", "int8_float16", "int8_float32", "bfloat16"], key=_EDITOR_KEYS["compute"])
             st.text_input("Language", key=_EDITOR_KEYS["language"], placeholder="blank = auto detect")
         st.checkbox("VAD filtering", key=_EDITOR_KEYS["vad"], help="Voice activity detection can skip long non-speech regions during transcription.")
+
+        st.divider()
+        st.subheader("Transcription engine", anchor=False)
+        st.caption(
+            "faster-whisper runs through CTranslate2, whose only GPU backend is CUDA, so on "
+            "an AMD or Intel card it runs on the processor. whisper.cpp has a Vulkan backend "
+            "that uses those cards. Measured on the same five minutes with large-v3-turbo: "
+            "101.7s on the processor, 19.4s on Vulkan."
+        )
+        st.selectbox(
+            "Engine",
+            ["faster-whisper", "auto", "whispercpp"],
+            key=_EDITOR_KEYS["backend"],
+            format_func=lambda value: {
+                "faster-whisper": "faster-whisper (proven, processor bound here)",
+                "auto": "Auto (whisper.cpp when available, otherwise faster-whisper)",
+                "whispercpp": "whisper.cpp on Vulkan (fastest, requires a local build)",
+            }[value],
+            help=(
+                "Auto falls back quietly when no whisper.cpp build is present. Choosing "
+                "whisper.cpp explicitly reports what is missing instead of silently taking "
+                "several times longer."
+            ),
+        )
+        if st.session_state[_EDITOR_KEYS["backend"]] != "faster-whisper":
+            _render_whispercpp_status()
+        st.checkbox(
+            "Refine word timings on candidates",
+            key=_EDITOR_KEYS["refine_words"],
+            help=(
+                "whisper.cpp cannot produce word timings alongside flash attention, which is "
+                "where its speed comes from. This re-transcribes only the candidate windows "
+                "with faster-whisper so karaoke captions and the timeline strip still work. "
+                "About five minutes for a full VOD."
+            ),
+        )
+        if (
+            st.session_state[_EDITOR_KEYS["backend"]] != "faster-whisper"
+            and not st.session_state[_EDITOR_KEYS["refine_words"]]
+        ):
+            st.warning(
+                "Without refinement, whisper.cpp transcripts carry no word timings, so karaoke "
+                "captions and snap-to-word will have nothing to work from."
+            )
 
     with detection:
         st.selectbox(
