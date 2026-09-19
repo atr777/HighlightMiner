@@ -104,3 +104,58 @@ render_mine_page(Path(r"{db}"))
         tmp_path,
     )
     assert not app.exception, app.exception
+
+
+def test_crop_page_renders(tmp_path):
+    db = (tmp_path / "highlightminer.db").as_posix()
+    app = _run(
+        f'''
+from pathlib import Path
+from highlightminer.ui_crop import render_crop_page
+render_crop_page(Path(r"{db}"))
+''',
+        tmp_path,
+    )
+    assert not app.exception, app.exception
+
+
+def test_crop_page_warns_when_the_layout_is_not_crop(tmp_path):
+    from highlightminer.config import Settings
+    from highlightminer.settings_store import save_app_settings
+
+    db = tmp_path / "highlightminer.db"
+    save_app_settings(Settings(render_layout="letterbox"), db)
+    app = _run(
+        f'''
+from pathlib import Path
+from highlightminer.ui_crop import render_crop_page
+render_crop_page(Path(r"{db.as_posix()}"))
+''',
+        tmp_path,
+    )
+    assert not app.exception
+    assert any("letterbox" in i.value for i in app.info)
+
+
+def test_crop_page_seeds_sliders_from_the_saved_region(tmp_path):
+    from highlightminer.config import Settings
+    from highlightminer.settings_store import save_app_settings
+
+    db = tmp_path / "highlightminer.db"
+    save_app_settings(
+        Settings(render_layout="crop", gameplay_rect={"x": 0.27, "y": 0.0, "w": 0.316406, "h": 1.0}),
+        db,
+    )
+    app = _run(
+        f'''
+from pathlib import Path
+from highlightminer.ui_crop import render_crop_page
+render_crop_page(Path(r"{db.as_posix()}"))
+''',
+        tmp_path,
+    )
+    assert not app.exception
+    # The position sliders only render once frames have been sampled, so the
+    # saved region shows up in seeded state rather than in a widget.
+    assert app.session_state["crop_tool_x"] == pytest.approx(0.27)
+    assert app.session_state["crop_tool_h"] == pytest.approx(1.0)

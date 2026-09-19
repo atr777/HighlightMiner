@@ -11,10 +11,11 @@ from highlightminer.storage import default_db_path
 from highlightminer.shutdown import active_work_shutdown_block_reason
 from highlightminer.ui_common import render_shutdown
 from highlightminer.ui_mine import analysis_is_running, render_mine_page
+from highlightminer.ui_crop import render_crop_page
 from highlightminer.ui_settings import render_settings_page
 from highlightminer.ui_style import apply_shell_style
 
-_NAV_ITEMS = ["⛏️ Mine / Review", "⚙️ Settings"]
+_NAV_ITEMS = ["⛏️ Mine / Review", "🎯 Crop", "⚙️ Settings"]
 _NAV_KEY = "main_navigation"
 
 
@@ -69,6 +70,13 @@ def _render_app() -> None:
             st.caption(f"Database: `{db_path}`")
             render_shutdown(block_reason=active_work_shutdown_block_reason(db_path))
         render_settings_page(db_path)
+        return
+
+    if page == "🎯 Crop":
+        with st.sidebar:
+            st.caption(f"Database: `{db_path}`")
+            render_shutdown(block_reason=active_work_shutdown_block_reason(db_path))
+        render_crop_page(db_path)
         return
 
     render_mine_page(db_path)
