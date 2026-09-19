@@ -11,7 +11,9 @@ overnight job.
 
 from __future__ import annotations
 
+import logging
 import time
+import traceback
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
@@ -42,6 +44,7 @@ class BatchJob:
     analysis_id: str | None = None
     error: str | None = None
     chat_note: str | None = None
+    traceback: str | None = None
     seconds: float = 0.0
 
     @property
@@ -162,7 +165,14 @@ def run_batch(
         except Exception as exc:  # noqa: BLE001 - one bad source must not end the run
             job.status = _STATUS_FAILED
             job.error = f"{type(exc).__name__}: {exc}"
+            job.traceback = traceback.format_exc()
             report(job, f"failed: {job.error}")
+            # The one-line summary is not enough to diagnose anything; a
+            # MemoryError deep inside Whisper's VAD looks identical to a dozen
+            # other failures without the frames.
+            logging.getLogger(__name__).error(
+                "Batch job failed: %s\n%s", job.source, job.traceback
+            )
         finally:
             job.seconds = round(time.perf_counter() - started, 1)
 

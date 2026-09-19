@@ -26,6 +26,7 @@ def product_default_settings() -> Settings:
         beam_size=5,
         vad_filter=True,
         word_timestamps=True,
+        transcribe_chunk_sec=1800.0,
         audio_window_sec=1.0,
         audio_hop_sec=0.5,
         pre_roll_sec=18.0,

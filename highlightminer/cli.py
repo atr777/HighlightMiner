@@ -418,6 +418,8 @@ def cmd_batch(args: argparse.Namespace) -> int:
         print(f"  {marker} {job.seconds:>7.1f}s  {job.label}  {detail}")
         if job.chat_note:
             print(f"         chat: {job.chat_note}")
+        if job.traceback:
+            print(job.traceback)
     return 0 if not result.failed else 1
 
 

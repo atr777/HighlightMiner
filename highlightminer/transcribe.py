@@ -4,10 +4,12 @@ import logging
 import math
 import re
 import time
+import wave
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import psutil
 
 from .config import Settings
@@ -184,7 +186,12 @@ def score_text(text: str, reaction_phrases: list[str]) -> tuple[float, list[str]
     return clamp(score), reasons
 
 
-def _segment_words(segment: object, seg_start: float, seg_end: float) -> list[dict]:
+def _segment_words(
+    segment: object,
+    seg_start: float,
+    seg_end: float,
+    offset: float = 0.0,
+) -> list[dict]:
     """Extract per-word timings, when the model was asked for them.
 
     Captions need word timing, and tighter clip boundaries fall out of it for
@@ -202,10 +209,85 @@ def _segment_words(segment: object, seg_start: float, seg_end: float) -> list[di
         end = _safe_float(getattr(word, "end", None))
         if start is None or end is None:
             continue
+        # Word times are relative to the chunk the model saw.
+        start += offset
+        end += offset
         start = min(max(start, seg_start), seg_end)
         end = min(max(end, start), seg_end)
         out.append({"w": text, "s": round(start, 3), "e": round(end, 3)})
     return out
+
+
+
+# Each chunk is fed this many extra seconds past the region it owns, so speech
+# straddling a boundary is transcribed in full rather than truncated. Measured
+# without it: transcript gaps landing exactly on every boundary.
+CHUNK_OVERLAP_SEC = 15.0
+
+
+def _iter_audio_chunks(wav_path: str | Path, chunk_sec: float, overlap_sec: float = CHUNK_OVERLAP_SEC):
+    """Yield (offset_seconds, samples, owned_end_seconds) without loading the file.
+
+    Chunk *i* owns ``[i*chunk, (i+1)*chunk)`` but is handed ``overlap_sec`` of
+    extra audio past that. A segment beginning inside the owned region is
+    therefore complete even when it runs past the boundary, and the caller keeps
+    only segments that begin in the owned region, so nothing is duplicated.
+
+    faster-whisper accepts a numpy array directly, so chunks never touch disk.
+    """
+    with wave.open(str(wav_path), "rb") as wf:
+        if wf.getsampwidth() != 2:
+            raise ValueError("Expected 16-bit PCM WAV from FFmpeg")
+        rate = wf.getframerate()
+        channels = wf.getnchannels()
+        total_frames = wf.getnframes()
+        step = max(1, int(chunk_sec * rate))
+        overlap = max(0, int(overlap_sec * rate))
+
+        position = 0
+        while position < total_frames:
+            wf.setpos(position)
+            wanted = min(step + overlap, total_frames - position)
+            raw = wf.readframes(wanted)
+            if not raw:
+                return
+            block = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            if channels > 1:
+                block = block.reshape(-1, channels).mean(axis=1)
+            owned_end = min(position + step, total_frames) / rate
+            yield position / rate, block, owned_end
+            position += step
+
+
+def _iter_segments(model, audio_path: str | Path, kwargs: dict, chunk_sec: float):
+    """Yield (offset, segment) pairs, transcribing in bounded chunks when asked.
+
+    Whisper's VAD filter builds the entire signal as one array of 576-sample
+    frames. For a 13.5 hour VOD that is 1.5 million frames, 3.3 GB, and it fails
+    outright on a 16 GB machine. Chunking bounds that regardless of VOD length.
+
+    Chunks overlap, and a segment is kept only by the chunk whose owned region
+    it begins in. That way speech crossing a boundary is transcribed in full by
+    the earlier chunk and not repeated by the later one.
+    """
+    if chunk_sec <= 0:
+        segments, info = model.transcribe(str(audio_path), **kwargs)
+        yield from ((0.0, seg) for seg in segments)
+        return info
+
+    info = None
+    for offset, samples, owned_end in _iter_audio_chunks(audio_path, chunk_sec):
+        segments, chunk_info = model.transcribe(samples, **kwargs)
+        if info is None:
+            info = chunk_info
+        for seg in segments:
+            start = _safe_float(getattr(seg, "start", None))
+            # Segments starting in the overlap tail belong to the next chunk,
+            # which will transcribe them with more of their audio available.
+            if start is not None and (offset + start) >= owned_end:
+                continue
+            yield offset, seg
+    return info
 
 
 def transcribe_audio(
@@ -309,7 +391,23 @@ def transcribe_audio(
     if settings.language:
         kwargs["language"] = settings.language
 
-    segments, info = model.transcribe(str(audio_path), **kwargs)
+    duration_hint = max(0.0, float(audio_duration or 0.0))
+    chunk_sec = float(getattr(settings, "transcribe_chunk_sec", 0.0) or 0.0)
+    # Chunk only when the audio is known to be longer than one chunk. Short
+    # audio and an unknown duration both take the original single-pass path, so
+    # nothing changes for the common case and chunk boundaries are never
+    # introduced needlessly.
+    if chunk_sec > 0 and duration_hint <= chunk_sec:
+        chunk_sec = 0.0
+    if chunk_sec > 0:
+        log_detailed("transcription.chunked", chunk_seconds=chunk_sec)
+
+    info = None
+
+    def _segment_source():
+        nonlocal info
+        info = yield from _iter_segments(model, audio_path, kwargs, chunk_sec)
+
     rows: list[dict] = []
     duration = max(0.0, float(audio_duration or 0.0))
     last_report_at = started_at
@@ -338,9 +436,13 @@ def transcribe_audio(
         last_fraction = fraction
 
     report_transcription(force=True)
-    for seg in segments:
+    for chunk_offset, seg in _segment_source():
         start = _safe_float(getattr(seg, "start", None))
         end = _safe_float(getattr(seg, "end", None))
+        if start is not None:
+            start += chunk_offset
+        if end is not None:
+            end += chunk_offset
         if end is not None:
             furthest_audio_second = max(furthest_audio_second, max(0.0, end))
             report_transcription()
@@ -358,7 +460,7 @@ def transcribe_audio(
             "text": text,
             "score": round(score, 4),
             "reasons": reasons,
-            "words": _segment_words(seg, start, end),
+            "words": _segment_words(seg, start, end, chunk_offset),
         })
 
     elapsed_seconds = max(0.0, time.perf_counter() - started_at)

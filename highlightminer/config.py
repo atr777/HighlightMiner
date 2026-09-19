@@ -32,6 +32,7 @@ class Settings:
     beam_size: int = 5
     vad_filter: bool = True
     word_timestamps: bool = True
+    transcribe_chunk_sec: float = 1800.0
     audio_window_sec: float = 1.0
     audio_hop_sec: float = 0.5
     pre_roll_sec: float = 18.0
@@ -151,6 +152,7 @@ class Settings:
             "hook_lead_sec": (0.0, 60.0),
             "min_candidate_sec": (1.0, 600.0),
             "speech_snap_sec": (0.0, 30.0),
+            "transcribe_chunk_sec": (0.0, 86400.0),
             "chat_min_burst_messages": (0.5, 100.0),
             "chat_quiet_msgs_per_min": (0.0, 1000.0),
             "chat_active_msgs_per_min": (0.0, 5000.0),
