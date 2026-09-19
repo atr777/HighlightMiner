@@ -36,7 +36,7 @@ from .storage import (
     learning_summary,
     list_analyses,
     load_analysis,
-    analysis_crop_rect,
+    resolve_crop_rect,
     record_export,
     transcript_window,
 )
@@ -330,7 +330,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         print("No clips selected. Mark clips Keep in the UI or pass --all.")
         return 2
 
-    layout = None
+    layout_settings = None
     if getattr(args, "layout", "source") != "source":
         from dataclasses import dataclass as _dataclass
 
@@ -344,17 +344,21 @@ def cmd_export(args: argparse.Namespace) -> int:
             webcam_fraction: float = 0.3
 
 
-        layout = layout_from_settings(
-            _ExportLayoutSettings(args.layout),
-            analysis_crop_rect(args.db, args.analysis_id),
-        )
+        layout_settings = _ExportLayoutSettings(args.layout)
 
     captions = bool(getattr(args, "captions", False))
-    if captions and layout is None:
+    if captions and layout_settings is None:
         print("--captions needs a vertical --layout; captions are burned during reframing.")
         return 2
 
     for c, r in chosen:
+        # Most specific framing wins: this clip, then the source.
+        layout = (
+            layout_from_settings(
+                layout_settings, resolve_crop_rect(args.db, args.analysis_id, c["id"])
+            )
+            if layout_settings is not None else None
+        )
         category = c.get("content_label") or analysis.get("content_label")
         out = export_clip(
             source_video,

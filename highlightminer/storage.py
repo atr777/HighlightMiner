@@ -308,6 +308,7 @@ def initialize(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "candidates", "features_json TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(conn, "transcript_segments", "words_json TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "sources", "crop_rect_json TEXT")
+    _ensure_column(conn, "reviews", "crop_rect_json TEXT")
     if source_counter_added:
         conn.execute(
             """
@@ -428,6 +429,60 @@ def analysis_crop_rect(db_path: str | Path | None, analysis_id: str) -> dict | N
         return None
     rect = _unjson(row["crop_rect_json"], None)
     return rect if isinstance(rect, dict) else None
+
+
+
+def candidate_crop_rect(
+    db_path: str | Path | None,
+    analysis_id: str,
+    candidate_id: str,
+) -> dict | None:
+    """The crop window chosen for one clip, if any."""
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT crop_rect_json FROM reviews WHERE analysis_id = ? AND candidate_id = ?",
+            (analysis_id, candidate_id),
+        ).fetchone()
+    if not row or not row["crop_rect_json"]:
+        return None
+    rect = _unjson(row["crop_rect_json"], None)
+    return rect if isinstance(rect, dict) else None
+
+
+def save_candidate_crop_rect(
+    db_path: str | Path | None,
+    analysis_id: str,
+    candidate_id: str,
+    rect: dict | None,
+) -> bool:
+    """Remember (or clear) the crop window for one clip. False if unknown."""
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            "UPDATE reviews SET crop_rect_json = ?, updated_at = ? "
+            "WHERE analysis_id = ? AND candidate_id = ?",
+            (_json(rect) if rect else None, utc_now(), analysis_id, candidate_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def resolve_crop_rect(
+    db_path: str | Path | None,
+    analysis_id: str,
+    candidate_id: str | None = None,
+) -> dict | None:
+    """The crop window that applies, most specific first.
+
+    A clip's own framing beats the channel's, which beats the profile default.
+    Framing is an editorial decision about one moment, so per clip is the
+    sensible default; the source-wide setting is for a channel whose overlay
+    layout never moves.
+    """
+    if candidate_id:
+        rect = candidate_crop_rect(db_path, analysis_id, candidate_id)
+        if rect:
+            return rect
+    return analysis_crop_rect(db_path, analysis_id)
 
 
 def register_source(db_path: str | Path | None, source: dict[str, Any]) -> dict[str, Any]:
@@ -949,6 +1004,7 @@ def load_review(db_path: str | Path | None, analysis_id: str, analysis: dict | N
             "start": float(r["start"]),
             "end": float(r["end"]),
             "title": r["title"],
+            "crop_rect": _unjson(r["crop_rect_json"], None) if "crop_rect_json" in r.keys() else None,
             "reviewed_at": r["reviewed_at"],
             "exported_at": r["exported_at"],
             "export_path": r["export_path"],

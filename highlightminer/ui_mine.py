@@ -69,6 +69,9 @@ from .storage import (
     load_analysis,
     analysis_crop_rect,
     audio_feature_window,
+    candidate_crop_rect,
+    resolve_crop_rect,
+    save_candidate_crop_rect,
     transcript_window,
 )
 from .shutdown import active_work_shutdown_block_reason
@@ -300,6 +303,31 @@ def _create_queued_analysis_job(
     )
     config["analysis_title"] = str(analysis_title).strip()
     return create_analysis_job(db_path, source, config)
+
+
+
+# Review status colours. Kept clips are what you are hunting for, so they get
+# the positive colour; rejected ones are dimmed rather than alarming, because a
+# reject is a normal outcome and not an error.
+_STATUS_STYLES = {
+    "keep": "background-color: rgba(46, 160, 67, 0.28)",
+    "reject": "background-color: rgba(210, 153, 34, 0.24)",
+}
+
+
+def _style_candidate_rows(rows: list[dict]):
+    """Tint each row by review status, so progress is visible at a glance."""
+    import pandas as pd
+
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    def row_style(row):
+        style = _STATUS_STYLES.get(str(row.get("Status", "")), "")
+        return [style] * len(row)
+
+    return frame.style.apply(row_style, axis=1)
 
 
 def _candidate_rows(analysis: dict, review: dict) -> list[dict]:
@@ -793,11 +821,15 @@ def _render_crop_controls(
         )
         return
 
-    x_key = f"crop_x_{analysis_id}"
-    y_key = f"crop_y_{analysis_id}"
-    h_key = f"crop_h_{analysis_id}"
+    # Keyed per clip: framing is an editorial choice about one moment, so
+    # adjusting one candidate must not silently reframe the rest of the queue.
+    x_key = f"crop_x_{analysis_id}_{candidate['id']}"
+    y_key = f"crop_y_{analysis_id}_{candidate['id']}"
+    h_key = f"crop_h_{analysis_id}_{candidate['id']}"
     if x_key not in st.session_state:
-        saved = analysis_crop_rect(db_path, analysis_id) or settings.gameplay_rect
+        saved = (
+            resolve_crop_rect(db_path, analysis_id, candidate["id"]) or settings.gameplay_rect
+        )
         if saved:
             st.session_state[x_key] = float(saved.get("x", 0.341797))
             st.session_state[y_key] = float(saved.get("y", 0.0))
@@ -853,10 +885,30 @@ def _render_crop_controls(
         st.caption(f"Could not render the framing preview: {exc}")
         return
 
-    if st.button(
-        "Save framing for this source",
-        key=f"save_crop_{analysis_id}_{candidate['id']}",
+    source_rect = analysis_crop_rect(db_path, analysis_id)
+    clip_rect = candidate_crop_rect(db_path, analysis_id, candidate["id"])
+    if clip_rect:
+        st.caption("This clip has its own framing.")
+    elif source_rect:
+        st.caption("Using the framing saved for this source.")
+
+    this_clip, whole_source, clear = st.columns(3)
+    if this_clip.button(
+        "Save for this clip",
+        key=f"save_crop_clip_{analysis_id}_{candidate['id']}",
+        type="primary",
         width="stretch",
+    ):
+        if save_candidate_crop_rect(db_path, analysis_id, candidate["id"], rect.as_dict()):
+            st.success("Saved for this clip. Press **Update preview** to see it in motion.")
+        else:
+            st.warning("Could not store framing for this clip.")
+
+    if whole_source.button(
+        "Apply to whole source",
+        key=f"save_crop_source_{analysis_id}_{candidate['id']}",
+        width="stretch",
+        help="Use this window for every clip from this channel that has no framing of its own.",
     ):
         from .identity import describe_source
         from .storage import save_source_crop_rect
@@ -870,9 +922,19 @@ def _render_crop_controls(
             save_app_settings(
                 dataclasses.replace(settings, gameplay_rect=rect.as_dict()), db_path
             )
-        st.success(
-            "Saved. Every clip from this source uses it; press **Update preview** to see it in motion."
-        )
+        st.success("Saved for every clip from this source without its own framing.")
+
+    if clear.button(
+        "Clear this clip",
+        key=f"clear_crop_{analysis_id}_{candidate['id']}",
+        width="stretch",
+        disabled=not clip_rect,
+        help="Fall back to the source framing.",
+    ):
+        save_candidate_crop_rect(db_path, analysis_id, candidate["id"], None)
+        for key in (x_key, y_key, h_key):
+            st.session_state.pop(key, None)
+        st.rerun()
 
 
 def _render_url_ingest(db_path: Path, *, disabled: bool = False) -> None:
@@ -1290,14 +1352,14 @@ def _render_review(db_path: Path) -> None:
     selection_key = f"candidate_table_{analysis_id}"
     last_row_key = f"candidate_row_{analysis_id}"
     table = st.dataframe(
-        _candidate_rows(analysis, review),
+        _style_candidate_rows(_candidate_rows(analysis, review)),
         width="stretch",
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
         key=selection_key,
     )
-    st.caption("Click a row to review that clip.")
+    st.caption("Click a row to review that clip. Green is kept, amber is rejected.")
 
     chosen_rows: list[int] = []
     try:
@@ -1457,7 +1519,8 @@ def _render_review(db_path: Path) -> None:
             try:
                 render_settings = load_app_settings(db_path)
                 preview_layout = layout_from_settings(
-                    render_settings, analysis_crop_rect(db_path, analysis_id)
+                    render_settings,
+                    resolve_crop_rect(db_path, analysis_id, candidate["id"]),
                 )
                 preview_transcript = (
                     transcript_window(db_path, analysis_id, preview_start, preview_end)
@@ -1639,7 +1702,8 @@ def _execute_export_queue(db_path: Path) -> None:
                 source_video = validate_local_video(item["source_path"])
                 export_settings = load_app_settings(db_path)
                 export_layout = layout_from_settings(
-                    export_settings, analysis_crop_rect(db_path, item["analysis_id"])
+                    export_settings,
+                    resolve_crop_rect(db_path, item["analysis_id"], item.get("candidate_id")),
                 )
                 export_kwargs = {}
                 if export_layout is not None:
