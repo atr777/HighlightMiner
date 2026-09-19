@@ -27,8 +27,47 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Error messages from the app contain characters a cp1252 console cannot
+# encode. Printing one killed an entire benchmark run partway through.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 from highlightminer.config import Settings  # noqa: E402
 from highlightminer.media import require_executable  # noqa: E402
+
+
+
+def _save(path: str | None, rows: list[dict]) -> None:
+    """Persist results as they stand, so one bad variant loses nothing."""
+    if not path:
+        return
+    try:
+        Path(path).write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"  (could not write {path}: {exc})")
+
+
+def _model_installed(name: str) -> bool:
+    """Whether a Whisper model is already in the local cache.
+
+    Benchmarks should compare what is on the machine, not silently pull two
+    gigabytes in the middle of a timing run.
+    """
+    from huggingface_hub import constants, scan_cache_dir
+
+    aliases = {
+        "turbo": "large-v3-turbo",
+        "large-v3-turbo": "large-v3-turbo",
+    }
+    wanted = aliases.get(name, name)
+    try:
+        cache = scan_cache_dir(constants.HF_HUB_CACHE)
+    except Exception:
+        return True  # cannot tell; let the run try
+    return any(wanted in repo.repo_id.lower() for repo in cache.repos)
 
 
 def _table(rows: list[dict], columns: list[str]) -> str:
@@ -79,6 +118,10 @@ def bench_transcribe(args: argparse.Namespace) -> int:
     rows: list[dict] = []
     for label, overrides in variants:
         settings = dataclasses.replace(base, **overrides)
+        if not _model_installed(settings.whisper_model):
+            rows.append({"variant": label, "seconds": "SKIPPED", "note": "model not installed"})
+            print(f"  {label}: SKIPPED (model not installed)")
+            continue
         try:
             started = time.perf_counter()
             segments, meta = transcribe_audio(audio, settings, audio_duration=duration)
@@ -105,8 +148,7 @@ def bench_transcribe(args: argparse.Namespace) -> int:
 
     print()
     print(_table(rows, ["variant", "seconds", "xRT", "segments", "words", "agree"]))
-    if args.out:
-        Path(args.out).write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    _save(args.out, rows)
     return 0
 
 
