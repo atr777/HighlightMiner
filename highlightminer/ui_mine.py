@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,7 +60,7 @@ from .preview_player import preview_player
 from .review import load_review, save_review
 from .security import validate_chat_file, validate_local_video
 from .settings_presets import detect_weight_preset, normalize_weights
-from .settings_store import load_app_settings
+from .settings_store import load_app_settings, save_app_settings
 from .storage import (
     find_source_runs,
     import_legacy_analysis,
@@ -768,6 +770,111 @@ def _render_timing_controls(
     )
 
 
+
+def _render_crop_controls(
+    db_path: Path,
+    analysis: dict,
+    analysis_id: str,
+    candidate: dict,
+    settings,
+) -> None:
+    """Adjust the 9:16 window against a real frame from this clip.
+
+    A still is pulled once and then cropped with PIL, so moving the window is
+    instant. Re-encoding a preview to see whether the framing is right is the
+    slow way to answer a question a single frame already answers.
+    """
+    from .crop_tool import CropToolError, annotate_frame, crop_preview, extract_frame, rect_for_aspect
+
+    if settings.render_layout != "crop":
+        st.caption(
+            f"Layout is **{settings.render_layout}**. Switch it to **crop** in Settings "
+            "to use a framing window."
+        )
+        return
+
+    x_key = f"crop_x_{analysis_id}"
+    y_key = f"crop_y_{analysis_id}"
+    h_key = f"crop_h_{analysis_id}"
+    if x_key not in st.session_state:
+        saved = analysis_crop_rect(db_path, analysis_id) or settings.gameplay_rect
+        if saved:
+            st.session_state[x_key] = float(saved.get("x", 0.341797))
+            st.session_state[y_key] = float(saved.get("y", 0.0))
+            st.session_state[h_key] = float(saved.get("h", 1.0))
+        else:
+            centred = rect_for_aspect(x=0.0, height=1.0)
+            st.session_state[x_key] = round((1.0 - centred.w) / 2, 6)
+            st.session_state[y_key] = 0.0
+            st.session_state[h_key] = 1.0
+
+    frame_key = f"crop_frame_{analysis_id}_{candidate['id']}"
+    frame_path = st.session_state.get(frame_key)
+    if not frame_path or not Path(frame_path).exists():
+        # Sample where the moment actually peaks, not the padded start.
+        when = float(candidate.get("peak_time") or candidate["start"])
+        target = (
+            Path(analysis["work_dir"]) / ".previews" / analysis_id / f"crop_{candidate['id']}.png"
+        )
+        try:
+            source = validate_local_video(analysis["video_path"])
+            frame_path = str(extract_frame(source, when, target, width=720))
+            st.session_state[frame_key] = frame_path
+        except (CropToolError, Exception) as exc:  # noqa: BLE001 - shown to the user
+            st.caption(f"Could not read a frame for framing: {exc}")
+            return
+
+    rect = rect_for_aspect(
+        x=float(st.session_state[x_key]),
+        y=float(st.session_state[y_key]),
+        height=float(st.session_state[h_key]),
+    )
+
+    sliders, marked, result = st.columns([2, 2, 1])
+    with sliders:
+        st.slider("Horizontal", 0.0, 1.0, step=0.005, key=x_key)
+        st.slider("Vertical", 0.0, 1.0, step=0.005, key=y_key)
+        st.slider("Height kept", 0.3, 1.0, step=0.01, key=h_key)
+        st.caption(f"x={rect.x:.3f} w={rect.w:.3f} · keeps {rect.w * 100:.0f}% of the width")
+
+    work = Path(analysis["work_dir"]) / ".previews" / analysis_id
+    try:
+        marked.image(
+            str(annotate_frame(frame_path, rect, work / f"cropmark_{candidate['id']}.png")),
+            caption="Kept region",
+            width="stretch",
+        )
+        result.image(
+            str(crop_preview(frame_path, rect, work / f"cropout_{candidate['id']}.png", height=420)),
+            caption="Result",
+            width="stretch",
+        )
+    except Exception as exc:  # noqa: BLE001 - framing aid, not the feature
+        st.caption(f"Could not render the framing preview: {exc}")
+        return
+
+    if st.button(
+        "Save framing for this source",
+        key=f"save_crop_{analysis_id}_{candidate['id']}",
+        width="stretch",
+    ):
+        from .identity import describe_source
+        from .storage import save_source_crop_rect
+
+        try:
+            fingerprint = describe_source(analysis["video_path"])["fingerprint"]
+            stored = save_source_crop_rect(db_path, fingerprint, rect.as_dict())
+        except Exception:  # noqa: BLE001 - fall back to the profile default
+            stored = False
+        if not stored:
+            save_app_settings(
+                dataclasses.replace(settings, gameplay_rect=rect.as_dict()), db_path
+            )
+        st.success(
+            "Saved. Every clip from this source uses it; press **Update preview** to see it in motion."
+        )
+
+
 def _render_url_ingest(db_path: Path, *, disabled: bool = False) -> None:
     """Fetch a VOD and its chat from a URL, then fill in the local file fields."""
     with st.expander("Fetch from a URL", expanded=False):
@@ -1421,6 +1528,13 @@ def _render_review(db_path: Path) -> None:
     else:
         preview_slot.empty()
         st.caption("Preview closed. Use **Update preview** to load it again.")
+
+    with st.expander("🎯 Crop framing", expanded=False):
+        # Loaded here rather than reusing the preview branch's copy, which only
+        # exists when a preview was rendered this run.
+        _render_crop_controls(
+            db_path, analysis, analysis_id, candidate, load_app_settings(db_path)
+        )
 
     if st.button("Close preview", disabled=preview_closed, key=f"close_preview_{analysis_id}_{candidate['id']}"):
         st.session_state[_PREVIEW_CLOSED_KEY] = True

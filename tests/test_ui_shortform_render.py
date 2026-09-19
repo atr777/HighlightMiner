@@ -159,3 +159,103 @@ render_crop_page(Path(r"{db.as_posix()}"))
     # saved region shows up in seeded state rather than in a widget.
     assert app.session_state["crop_tool_x"] == pytest.approx(0.27)
     assert app.session_state["crop_tool_h"] == pytest.approx(1.0)
+
+
+def _tiny_video(path: Path) -> Path:
+    """A real, probe-able video. The review page legitimately reads its duration."""
+    import subprocess
+
+    from highlightminer.media import require_executable
+
+    subprocess.run(
+        [
+            require_executable("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=navy:s=320x180:d=2",
+            "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+            str(path),
+        ],
+        check=True, capture_output=True,
+    )
+    return path
+
+
+def _analysis_db(tmp_path, render_layout="crop"):
+    """A database with one stored analysis, for driving the review page."""
+    from dataclasses import asdict
+
+    from highlightminer.config import Settings
+    from highlightminer.settings_store import save_app_settings
+    from highlightminer.storage import save_analysis
+
+    db = tmp_path / "highlightminer.db"
+    video = _tiny_video(tmp_path / "v.mp4")
+    settings = Settings(render_layout=render_layout, short_form_mode=True)
+    save_app_settings(settings, db)
+    payload = {
+        "version": 1,
+        "video_path": str(video),
+        "content_label": "T",
+        "duration": 2.0,
+        "media": {"duration": 2.0, "streams": []},
+        "transcription": {"language": "en"},
+        "chat": {"path": None, "messages": 0},
+        "settings": asdict(settings),
+        "work_dir": str(tmp_path / "work"),
+        "candidates": [{
+            "id": "H001", "rank": 1, "score": 0.9, "peak_time": 1.0,
+            "start": 0.2, "end": 1.8, "start_label": "00:00", "end_label": "00:01",
+            "audio_score": 0.9, "transcript_score": 0.5, "chat_score": 0.0,
+            "reason": "audio spike", "transcript": "words", "content_label": "T",
+            "features": {},
+        }],
+    }
+    analysis_id = save_analysis(db, payload, [], [], [], work_dir=str(tmp_path / "work"))
+    return db, analysis_id
+
+
+def test_review_page_renders_with_a_stored_analysis(tmp_path):
+    db, analysis_id = _analysis_db(tmp_path)
+    app = _run(
+        f'''
+import streamlit as st
+from pathlib import Path
+from highlightminer.ui_mine import render_mine_page
+st.session_state["analysis_id"] = "{analysis_id}"
+render_mine_page(Path(r"{db.as_posix()}"))
+''',
+        tmp_path,
+    )
+    assert not app.exception, app.exception
+
+
+def test_review_page_has_no_candidate_dropdown(tmp_path):
+    """The ranked table is the selector; a second control would duplicate it."""
+    db, analysis_id = _analysis_db(tmp_path)
+    app = _run(
+        f'''
+import streamlit as st
+from pathlib import Path
+from highlightminer.ui_mine import render_mine_page
+st.session_state["analysis_id"] = "{analysis_id}"
+render_mine_page(Path(r"{db.as_posix()}"))
+''',
+        tmp_path,
+    )
+    assert not app.exception
+    assert not any(w.label == "Review candidate" for w in app.selectbox)
+
+
+def test_crop_controls_explain_themselves_on_a_non_crop_layout(tmp_path):
+    db, analysis_id = _analysis_db(tmp_path, render_layout="letterbox")
+    app = _run(
+        f'''
+import streamlit as st
+from pathlib import Path
+from highlightminer.ui_mine import render_mine_page
+st.session_state["analysis_id"] = "{analysis_id}"
+render_mine_page(Path(r"{db.as_posix()}"))
+''',
+        tmp_path,
+    )
+    assert not app.exception
