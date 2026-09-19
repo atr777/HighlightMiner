@@ -162,3 +162,48 @@ class TestRunBatch:
         result = run_batch([], tmp_path / "work", Settings())
         assert result.jobs == []
         assert result.summary() == "0/0 analyses completed, 0 failed"
+
+
+class TestSiblingChat:
+    """Ingest saves chat beside the video; re-running the local file must find it."""
+
+    def test_finds_the_ingest_naming(self, tmp_path):
+        from highlightminer.batch import find_sibling_chat
+
+        video = tmp_path / "TwitchVod-v1.mp4"
+        video.write_bytes(b"x")
+        chat = tmp_path / "TwitchVod-v1-chat.json"
+        chat.write_text("[]", encoding="utf-8")
+        assert find_sibling_chat(video) == chat
+
+    @pytest.mark.parametrize("suffix", ["-chat.json", "_chat.json", ".chat.json", "_chat.csv"])
+    def test_accepts_common_namings(self, tmp_path, suffix):
+        from highlightminer.batch import find_sibling_chat
+
+        video = tmp_path / "stream.mp4"
+        video.write_bytes(b"x")
+        (tmp_path / f"stream{suffix}").write_text("[]", encoding="utf-8")
+        assert find_sibling_chat(video) is not None
+
+    def test_returns_none_when_there_is_no_chat(self, tmp_path):
+        from highlightminer.batch import find_sibling_chat
+
+        video = tmp_path / "stream.mp4"
+        video.write_bytes(b"x")
+        assert find_sibling_chat(video) is None
+
+    def test_local_batch_job_picks_up_the_sibling(self, harness, tmp_path):
+        calls, _ = harness
+        video = tmp_path / "TwitchVod-v9.mp4"
+        video.write_bytes(b"x")
+        chat = tmp_path / "TwitchVod-v9-chat.json"
+        chat.write_text("[]", encoding="utf-8")
+
+        result = run_batch([str(video)], tmp_path / "work", Settings())
+        assert result.succeeded[0].chat_path == chat
+
+    def test_missing_sibling_is_noted_rather_than_silent(self, harness, tmp_path):
+        video = tmp_path / "lonely.mp4"
+        video.write_bytes(b"x")
+        result = run_batch([str(video)], tmp_path / "work", Settings())
+        assert "no chat file" in result.succeeded[0].chat_note

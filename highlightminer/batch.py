@@ -74,6 +74,23 @@ class BatchResult:
         return f"{ok}/{total} analyses completed, {len(self.failed)} failed"
 
 
+
+# Ingest writes chat beside the video as "<stem>-chat.json". Re-running a local
+# file should pick that up rather than silently analysing without chat, which is
+# easy to do by accident and quietly drops a whole signal.
+_CHAT_SUFFIXES = ("-chat.json", "_chat.json", ".chat.json", "-chat.jsonl", "_chat.csv")
+
+
+def find_sibling_chat(video_path: Path) -> Path | None:
+    """Find a chat export saved next to a video, if there is one."""
+    video_path = Path(video_path)
+    for suffix in _CHAT_SUFFIXES:
+        candidate = video_path.with_name(video_path.stem + suffix)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def parse_sources(values: Iterable[str]) -> list[str]:
     """Accept URLs, local paths, or a text file listing one source per line.
 
@@ -147,6 +164,9 @@ def run_batch(
                 if not local.is_file():
                     raise IngestError(f"Not a URL and not a local file: {job.source}")
                 job.video_path = local.resolve()
+                job.chat_path = find_sibling_chat(job.video_path)
+                if job.chat_path is None:
+                    job.chat_note = "no chat file found beside the video"
 
             report(job, "analyzing")
             work_dir = work_root / job.video_path.stem
