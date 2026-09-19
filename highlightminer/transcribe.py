@@ -454,6 +454,15 @@ def transcribe_audio(
             chunk_rows: list[dict] = []
             for seg in segments:
                 start = _safe_float(getattr(seg, "start", None))
+                end = _safe_float(getattr(seg, "end", None))
+                if end is not None:
+                    # Report inside the chunk, not just at its end. A 30 minute
+                    # chunk takes minutes, and a log that only moves once per
+                    # chunk is indistinguishable from a hung process.
+                    furthest_audio_second = max(
+                        furthest_audio_second, min(offset + max(0.0, end), owned_end)
+                    )
+                    report_transcription()
                 # Segments starting in the overlap tail belong to the next
                 # chunk, which sees more of their audio.
                 if start is not None and (offset + start) >= owned_end:

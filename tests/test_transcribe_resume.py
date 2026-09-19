@@ -232,3 +232,45 @@ class TestCheckpoint:
         short = _write_wav(tmp_path / "short.wav", 1.0)
         long = _write_wav(tmp_path / "long.wav", 5.0)
         assert signature_for(settings, short, 3.0, 15.0) != signature_for(settings, long, 3.0, 15.0)
+
+
+class TestProgressReporting:
+    def test_progress_is_reported_inside_a_chunk_not_only_at_its_end(self, tmp_path, monkeypatch):
+        """A log that only moves once per 30 minute chunk looks hung."""
+        wav = _write_wav(tmp_path / "a.wav", 9.0)
+        _install_model(
+            monkeypatch,
+            lambda i: [
+                _segment(f"a{i}", 0.2, 0.5),
+                _segment(f"b{i}", 1.0, 1.5),
+                _segment(f"c{i}", 2.0, 2.5),
+            ],
+        )
+        updates: list[float] = []
+        transcribe_audio(
+            wav, _settings(), prepared_model=_prepared(), audio_duration=9.0,
+            progress=lambda message, fraction: updates.append(fraction),
+        )
+        # Three chunks; reporting only at chunk ends would give at most four.
+        assert len(updates) > 4, f"only {len(updates)} progress updates"
+
+    def test_reported_fraction_never_runs_past_the_chunk(self, tmp_path, monkeypatch):
+        """A segment reaching into the overlap tail must not overstate progress."""
+        wav = _write_wav(tmp_path / "a.wav", 9.0)
+        _install_model(monkeypatch, lambda i: [_segment(f"tail{i}", 0.5, 20.0)])
+        updates: list[float] = []
+        transcribe_audio(
+            wav, _settings(), prepared_model=_prepared(), audio_duration=9.0,
+            progress=lambda message, fraction: updates.append(fraction),
+        )
+        assert updates and max(updates) <= 1.0
+
+    def test_fraction_increases_monotonically(self, tmp_path, monkeypatch):
+        wav = _write_wav(tmp_path / "a.wav", 9.0)
+        _install_model(monkeypatch, lambda i: [_segment(f"s{i}", 0.5, 2.0)])
+        updates: list[float] = []
+        transcribe_audio(
+            wav, _settings(), prepared_model=_prepared(), audio_duration=9.0,
+            progress=lambda message, fraction: updates.append(fraction),
+        )
+        assert updates == sorted(updates)
