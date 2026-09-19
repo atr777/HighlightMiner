@@ -126,11 +126,14 @@ def run_batch(
     progress: BatchProgress | None = None,
 ) -> BatchResult:
     """Ingest and analyze every source, continuing past individual failures."""
-    # Interactive analysis reserves a core so the desktop stays usable. An
-    # unattended batch has no desktop to protect, and measured 24% faster
-    # transcription with all logical cores minus one (103.5s against 128.3s
-    # on a 4 minute sample).
-    if cpu_threads is None:
+    # Interactive analysis reserves a core so the desktop stays usable, and an
+    # unattended batch has no desktop to protect: all logical cores minus one
+    # measured 24% faster (103.5s against 128.3s on a 4 minute sample).
+    #
+    # But an explicitly configured thread count wins. On a machine that is
+    # throwing machine-check exceptions, deliberately capping load must not be
+    # silently overridden just because the run is unattended.
+    if cpu_threads is None and not settings.cpu_threads:
         logical = psutil.cpu_count(logical=True) or 0
         cpu_threads = max(1, logical - 1) if logical > 1 else 0
     if cpu_threads:

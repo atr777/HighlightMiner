@@ -207,3 +207,49 @@ class TestSiblingChat:
         video.write_bytes(b"x")
         result = run_batch([str(video)], tmp_path / "work", Settings())
         assert "no chat file" in result.succeeded[0].chat_note
+
+
+class TestThreadBudget:
+    """An explicit cap must survive unattended runs."""
+
+    def test_auto_uses_most_of_the_machine(self, harness, tmp_path, monkeypatch):
+        captured = {}
+
+        def fake_analyze(video_path, work_dir, settings, **kwargs):
+            captured["threads"] = settings.cpu_threads
+            return "id"
+
+        monkeypatch.setattr(batch_module, "analyze_vod", fake_analyze)
+        monkeypatch.setattr(batch_module.psutil, "cpu_count", lambda logical=True: 12)
+        local = tmp_path / "v.mp4"
+        local.write_bytes(b"x")
+        run_batch([str(local)], tmp_path / "work", Settings(cpu_threads=0))
+        assert captured["threads"] == 11
+
+    def test_configured_cap_is_not_overridden(self, harness, tmp_path, monkeypatch):
+        """On a machine throwing machine checks, a deliberate cap must hold."""
+        captured = {}
+
+        def fake_analyze(video_path, work_dir, settings, **kwargs):
+            captured["threads"] = settings.cpu_threads
+            return "id"
+
+        monkeypatch.setattr(batch_module, "analyze_vod", fake_analyze)
+        monkeypatch.setattr(batch_module.psutil, "cpu_count", lambda logical=True: 12)
+        local = tmp_path / "v.mp4"
+        local.write_bytes(b"x")
+        run_batch([str(local)], tmp_path / "work", Settings(cpu_threads=6))
+        assert captured["threads"] == 6
+
+    def test_explicit_argument_still_wins(self, harness, tmp_path, monkeypatch):
+        captured = {}
+
+        def fake_analyze(video_path, work_dir, settings, **kwargs):
+            captured["threads"] = settings.cpu_threads
+            return "id"
+
+        monkeypatch.setattr(batch_module, "analyze_vod", fake_analyze)
+        local = tmp_path / "v.mp4"
+        local.write_bytes(b"x")
+        run_batch([str(local)], tmp_path / "work", Settings(cpu_threads=6), cpu_threads=3)
+        assert captured["threads"] == 3
