@@ -1177,15 +1177,36 @@ def _render_review(db_path: Path) -> None:
         return
 
     st.subheader("⛏️ Ranked candidates", anchor=False)
-    st.dataframe(_candidate_rows(analysis, review), width="stretch", hide_index=True)
+    # The table already lists everything a dropdown would repeat, so it is the
+    # selector. Rows are in the same order as `candidates`, so the selected
+    # position indexes straight into it.
+    selection_key = f"candidate_table_{analysis_id}"
+    last_row_key = f"candidate_row_{analysis_id}"
+    table = st.dataframe(
+        _candidate_rows(analysis, review),
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=selection_key,
+    )
+    st.caption("Click a row to review that clip.")
+
+    chosen_rows: list[int] = []
+    try:
+        chosen_rows = list(table.selection.rows)
+    except AttributeError:
+        chosen_rows = []
+    row_index = chosen_rows[0] if chosen_rows else int(st.session_state.get(last_row_key, 0))
+    row_index = min(max(row_index, 0), len(candidates) - 1)
+    st.session_state[last_row_key] = row_index
+
     if load_active_export_batch(db_path) is not None:
         st.info(
             "Candidate preview and review controls are locked while the export worker uses the staged queue snapshot."
         )
         return
-    labels = [f"{c['id']} · {c['score'] * 10:.1f}/10 · {format_time(c['peak_time'])} · {c['reason']}" for c in candidates]
-    selected_label = st.selectbox("Review candidate", labels)
-    candidate = candidates[labels.index(selected_label)]
+    candidate = candidates[row_index]
     item = review["items"][candidate["id"]]
     original_start = float(item["start"])
     original_end = float(item["end"])

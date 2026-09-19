@@ -108,10 +108,12 @@ _render_review(Path("unused.db"))
     app.run()
     assert player_calls[-1]["key"] == refreshed_key
     # Unsaved marks survive switching candidates and Streamlit widget cleanup.
-    selector = next(w for w in app.selectbox if w.label == "Review candidate")
-    selector.set_value(selector.options[1]).run()
-    selector = next(w for w in app.selectbox if w.label == "Review candidate")
-    selector.set_value(selector.options[0]).run()
+    # Selection is the ranked-candidates table now, which AppTest cannot click,
+    # so the same state it writes is set directly.
+    app.session_state["candidate_row_analysis"] = 1
+    app.run()
+    app.session_state["candidate_row_analysis"] = 0
+    app.run()
     assert app.text_input(key="clip_start_time_analysis_H001").value == "01:44"
     assert app.text_input(key="clip_end_time_analysis_H001").value == "02:02"
     # An invalid mark leaves both the successful field selection and preview alone.
@@ -137,10 +139,10 @@ _render_review(Path("unused.db"))
     app.text_input(key="clip_start_time_analysis_H001").set_value("01:45.75")
     next(b for b in app.button if b.label == "Update preview").click().run()
     assert app.session_state["preview_bounds_analysis_H001"] == (105.75, 122.5)
-    selector = next(w for w in app.selectbox if w.label == "Review candidate")
-    selector.set_value(selector.options[1]).run()
-    selector = next(w for w in app.selectbox if w.label == "Review candidate")
-    selector.set_value(selector.options[0]).run()
+    app.session_state["candidate_row_analysis"] = 1
+    app.run()
+    app.session_state["candidate_row_analysis"] = 0
+    app.run()
     assert app.text_input(key="clip_start_time_analysis_H001").value == "01:45.75"
     assert app.session_state["preview_bounds_analysis_H001"] == (105.75, 122.5)
     next(b for b in app.button if b.label == "💾 Save timing").click().run()
